@@ -1,0 +1,32 @@
+[Unit]
+Description=nanokube boot reconciliation
+Documentation=https://github.com/MatchaScript/nanokube
+# crio must be ready before we ask kubelet to bring up static pods.
+Wants=crio.service
+After=crio.service network-online.target
+# Intentionally NO Before=kubelet.service: while nanokube.service is
+# still 'activating' systemd would queue our own inline
+# `systemctl start kubelet.service` behind that activation and the
+# readyz wait would deadlock. We prevent kubelet from racing ahead by
+# shipping kubelet.service without an [Install] section, so it cannot
+# be enabled and multi-user.target cannot pull it in independently of
+# nanokube.
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/nanokube boot
+# Boot is verified end-to-end (Ensure -> kubelet -> /readyz ->
+# control-plane Ready) before READY=1 fires, and edge hardware can be
+# slow; allow a generous margin before systemd kills us.
+TimeoutStartSec=10m
+# Healthy boot leaves nanokube parked on SIGTERM so the unit stays
+# Active(running). Restart on unexpected exit would mask greenboot
+# failure detection — non-zero exits propagate to greenboot's
+# required.d/.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

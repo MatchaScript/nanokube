@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go unit / integration tests. Fast (seconds) and require no privileges;
+  # every PR runs this.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Go unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(go list -f '{{.Dir}}' ./... | grep -v '/reference/'))
+          if [[ -n "$unformatted" ]]; then
+            echo "gofmt violations:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test -race
+        run: go test -race -count=1 -timeout=3m ./...
+
+  # ---------------------------------------------------------------------------
+  # Shell E2E — installs CRI-O, kubelet, kubectl on the runner and drives
+  # the full bootstrap → boot → workload → reset lifecycle. Slow (~10 min)
+  # and needs sudo, so kept in its own job that only gates merges.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: End-to-end suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache: true
+
+      - name: Build nanokube
+        run: |
+          mkdir -p bin
+          go build -o bin/nanokube ./cmd/nanokube
+          sudo install -m 0755 bin/nanokube /usr/bin/nanokube
+
+      - name: Run E2E suite
+        run: sudo -E bash ./test/e2e/e2e.sh full
+
+      - name: Collect journals on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-journals
+          sudo journalctl -u crio.service --no-pager > /tmp/e2e-journals/crio.log    || true
+          sudo journalctl -u kubelet.service --no-pager > /tmp/e2e-journals/kubelet.log || true
+          sudo journalctl -u nanokube.service --no-pager > /tmp/e2e-journals/nanokube.log || true
+
+      - name: Upload journals
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-journals
+          path: /tmp/e2e-journals/
+          if-no-files-found: ignore

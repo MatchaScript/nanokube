@@ -1,0 +1,477 @@
+// Package backup implements nanokube's boot-time snapshot/restore via
+// directory copies. Only ostree / bootc systems take backups — the
+// snapshot window relies on etcd being stopped (nanokube.service runs
+// Before=kubelet.service) and restore is only meaningful when there is
+// an underlying bootc deployment to tie backups to. The caller (package
+// lifecycle) is responsible for gating the entry points on
+// ostree.IsOSTree().
+//
+// Layout under /var/lib/nanokube/backups:
+//
+//	restore                 — marker file placed by greenboot red.d
+//	                          just before bootc rollback; consumed on
+//	                          the next boot and removed after restore.
+//	<deployID>_<bootID>/    — one backup per successful boot, named
+//	                          after the deployment+boot whose data is
+//	                          contained.
+//	  meta.json             — Version/DeploymentID/BootID of that boot
+//	  etcd/                 — mirror of /var/lib/etcd
+//	  kubernetes/           — mirror of /etc/kubernetes
+//	  kubelet/
+//	    config.yaml
+//	    instance-config.yaml
+//	    kubeadm-flags.env
+//
+// Create and Restore both stage work under an intermediate
+// `<name>.tmp` / `<dst>.restoring` path and finalise with os.Rename,
+// mirroring microshift's AtomicDirCopy pattern
+// (reference/microshift/pkg/admin/data/atomic_dir_copy.go). A mid-run
+// crash therefore never leaves a half-written destination in place.
+package backup
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/state"
+)
+
+// kubeletStateFiles enumerates the /var/lib/kubelet files worth
+// preserving. Other entries (pods, plugins, pki) are regenerable and
+// would bloat the backup considerably.
+var kubeletStateFiles = []string{
+	"config.yaml",
+	"instance-config.yaml",
+	"kubeadm-flags.env",
+}
+
+const metaFileName = "meta.json"
+
+// BootID returns the current kernel boot id.
+func BootID() (string, error) {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", fmt.Errorf("read boot_id: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// Name composes the on-disk directory name for a backup.
+func Name(meta state.LastBoot) string {
+	return meta.DeploymentID + "_" + meta.BootID
+}
+
+// Exists reports whether a backup with this name is already on disk.
+func Exists(name string) (bool, error) {
+	_, err := os.Stat(filepath.Join(paths.BackupsDir, name))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// Create snapshots the current on-disk state (etcd + kubernetes +
+// selected kubelet files) into backups/<Name(meta)>/, naming the backup
+// after the boot whose data is captured. If a backup with that name
+// already exists the call is a no-op.
+func Create(meta state.LastBoot) error {
+	if meta.DeploymentID == "" || meta.BootID == "" {
+		return errors.New("backup requires DeploymentID and BootID")
+	}
+	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+		return err
+	}
+	name := Name(meta)
+	final := filepath.Join(paths.BackupsDir, name)
+	if exists, err := Exists(name); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+
+	tmp := final + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("clean stale %s: %w", tmp, err)
+	}
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return err
+	}
+
+	if err := copyDirIfExists(paths.EtcdDataDir, filepath.Join(tmp, "etcd")); err != nil {
+		return rollbackTmp(tmp, fmt.Errorf("copy etcd: %w", err))
+	}
+	if err := copyDirIfExists(paths.KubernetesDir, filepath.Join(tmp, "kubernetes")); err != nil {
+		return rollbackTmp(tmp, fmt.Errorf("copy kubernetes: %w", err))
+	}
+	kubeletDst := filepath.Join(tmp, "kubelet")
+	if err := os.MkdirAll(kubeletDst, 0o700); err != nil {
+		return rollbackTmp(tmp, err)
+	}
+	for _, f := range kubeletStateFiles {
+		src := filepath.Join(paths.KubeletDir, f)
+		dst := filepath.Join(kubeletDst, f)
+		if err := copyFileIfExists(src, dst); err != nil {
+			return rollbackTmp(tmp, fmt.Errorf("copy kubelet/%s: %w", f, err))
+		}
+	}
+	if err := writeMeta(tmp, meta); err != nil {
+		return rollbackTmp(tmp, fmt.Errorf("write meta: %w", err))
+	}
+
+	if err := os.Rename(tmp, final); err != nil {
+		return rollbackTmp(tmp, fmt.Errorf("rename %s -> %s: %w", tmp, final, err))
+	}
+	return nil
+}
+
+// ReadMeta returns the metadata recorded inside a backup directory.
+func ReadMeta(name string) (state.LastBoot, error) {
+	b, err := os.ReadFile(filepath.Join(paths.BackupsDir, name, metaFileName))
+	if err != nil {
+		return state.LastBoot{}, fmt.Errorf("read %s meta: %w", name, err)
+	}
+	var meta state.LastBoot
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return state.LastBoot{}, fmt.Errorf("parse %s meta: %w", name, err)
+	}
+	return meta, nil
+}
+
+// Restore swaps the live state trees with the contents of
+// backups/<name>/. Each target (etcd, kubernetes, selected kubelet
+// files) is staged under an intermediate path and atomically renamed.
+func Restore(name string) error {
+	src := filepath.Join(paths.BackupsDir, name)
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("stat backup %s: %w", name, err)
+	}
+
+	if err := restoreDir(filepath.Join(src, "etcd"), paths.EtcdDataDir); err != nil {
+		return fmt.Errorf("restore etcd: %w", err)
+	}
+	if err := restoreDir(filepath.Join(src, "kubernetes"), paths.KubernetesDir); err != nil {
+		return fmt.Errorf("restore kubernetes: %w", err)
+	}
+	if err := os.MkdirAll(paths.KubeletDir, 0o755); err != nil {
+		return err
+	}
+	for _, f := range kubeletStateFiles {
+		srcFile := filepath.Join(src, "kubelet", f)
+		dstFile := filepath.Join(paths.KubeletDir, f)
+		if _, err := os.Stat(srcFile); errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(dstFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove live %s: %w", f, err)
+			}
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := replaceFile(srcFile, dstFile); err != nil {
+			return fmt.Errorf("restore kubelet/%s: %w", f, err)
+		}
+	}
+	return nil
+}
+
+// List returns all backup directory names, excluding work-in-progress
+// `.tmp` / `.restoring` artefacts.
+func List() ([]string, error) {
+	entries, err := os.ReadDir(paths.BackupsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasSuffix(n, ".tmp") || strings.HasSuffix(n, ".restoring") {
+			continue
+		}
+		if _, _, ok := strings.Cut(n, "_"); !ok {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// LatestForDeployment returns the name of the most recent backup
+// belonging to deploymentID. Returns "" if none exists.
+func LatestForDeployment(deploymentID string) (string, error) {
+	names, err := List()
+	if err != nil {
+		return "", err
+	}
+	prefix := deploymentID + "_"
+	type stamped struct {
+		name string
+		info os.FileInfo
+	}
+	var candidates []stamped
+	for _, n := range names {
+		if !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(paths.BackupsDir, n))
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, stamped{n, info})
+	}
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
+	})
+	return candidates[0].name, nil
+}
+
+// LatestSize returns the on-disk size in bytes of the most recent
+// backup, summed across every regular file under its directory tree.
+// Returns 0 (without error) when no backups exist — the typical state
+// after `nanokube init` and before the first reboot snapshot. Used by
+// the preflight check to size the next snapshot's headroom.
+func LatestSize() (uint64, error) {
+	names, err := List()
+	if err != nil {
+		return 0, err
+	}
+	if len(names) == 0 {
+		return 0, nil
+	}
+	type stamped struct {
+		name string
+		info os.FileInfo
+	}
+	candidates := make([]stamped, 0, len(names))
+	for _, n := range names {
+		info, err := os.Stat(filepath.Join(paths.BackupsDir, n))
+		if err != nil {
+			return 0, err
+		}
+		candidates = append(candidates, stamped{n, info})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
+	})
+	return dirSize(filepath.Join(paths.BackupsDir, candidates[0].name))
+}
+
+func dirSize(root string) (uint64, error) {
+	var total uint64
+	err := filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += uint64(info.Size())
+		return nil
+	})
+	return total, err
+}
+
+// Prune drops backups whose deployment id is no longer known to the
+// system (bootc has GCed it) and, for still-known deployments, keeps
+// only the most recent backup per deployment.
+func Prune(knownDeployments []string) error {
+	known := make(map[string]bool, len(knownDeployments))
+	for _, d := range knownDeployments {
+		known[d] = true
+	}
+	names, err := List()
+	if err != nil {
+		return err
+	}
+	byDeploy := map[string][]string{}
+	for _, n := range names {
+		deploy, _, _ := strings.Cut(n, "_")
+		if !known[deploy] {
+			if err := os.RemoveAll(filepath.Join(paths.BackupsDir, n)); err != nil {
+				return fmt.Errorf("prune %s: %w", n, err)
+			}
+			continue
+		}
+		byDeploy[deploy] = append(byDeploy[deploy], n)
+	}
+	for _, group := range byDeploy {
+		if len(group) <= 1 {
+			continue
+		}
+		sort.Slice(group, func(i, j int) bool {
+			ii, _ := os.Stat(filepath.Join(paths.BackupsDir, group[i]))
+			jj, _ := os.Stat(filepath.Join(paths.BackupsDir, group[j]))
+			return ii.ModTime().After(jj.ModTime())
+		})
+		for _, n := range group[1:] {
+			if err := os.RemoveAll(filepath.Join(paths.BackupsDir, n)); err != nil {
+				return fmt.Errorf("prune %s: %w", n, err)
+			}
+		}
+	}
+	return nil
+}
+
+// RestoreRequested reports whether the external restore marker is present.
+func RestoreRequested() (bool, error) {
+	_, err := os.Stat(paths.RestoreMarker)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// ClearRestoreMarker removes the marker after restore has been handled.
+func ClearRestoreMarker() error {
+	if err := os.Remove(paths.RestoreMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// ---- internals ----
+
+func writeMeta(dir string, meta state.LastBoot) error {
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, metaFileName), b, 0o600)
+}
+
+func rollbackTmp(tmp string, cause error) error {
+	if err := os.RemoveAll(tmp); err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback cleanup: %w", err))
+	}
+	return cause
+}
+
+// restoreDir replaces dst with the contents of src via an intermediate
+// sibling of dst. When src is absent the backup did not cover this
+// tree (first-boot etcd case), so dst is wiped to keep restore total.
+func restoreDir(src, dst string) error {
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("remove live %s: %w", dst, err)
+		}
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	staged := dst + ".restoring"
+	if err := os.RemoveAll(staged); err != nil {
+		return err
+	}
+	if err := copyTree(src, staged); err != nil {
+		_ = os.RemoveAll(staged)
+		return err
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		_ = os.RemoveAll(staged)
+		return err
+	}
+	if err := os.Rename(staged, dst); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", staged, dst, err)
+	}
+	return nil
+}
+
+// replaceFile swaps dst for src using a sibling of dst as the staging
+// path, so the rename is atomic on the destination filesystem.
+func replaceFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	staged := dst + ".restoring"
+	if err := os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := copyFile(src, staged); err != nil {
+		_ = os.Remove(staged)
+		return err
+	}
+	return os.Rename(staged, dst)
+}
+
+// copyDirIfExists copies src to dst when src exists; otherwise it is a
+// no-op (dst is not created). Used for the etcd-absent first-boot case.
+func copyDirIfExists(src, dst string) error {
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return copyTree(src, dst)
+}
+
+func copyFileIfExists(src, dst string) error {
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	return copyFile(src, dst)
+}
+
+// copyTree copies an entire directory src into a new dst using
+// `cp --reflink=auto` so that Copy-on-Write filesystems (xfs, btrfs)
+// clone extents instead of duplicating bytes. dst must not exist.
+func copyTree(src, dst string) error {
+	return runCp(src, dst,
+		"--recursive",
+		"--no-target-directory",
+		"--preserve=mode,ownership,timestamps,links",
+		"--reflink=auto",
+	)
+}
+
+func copyFile(src, dst string) error {
+	return runCp(src, dst,
+		"--preserve=mode,ownership,timestamps,links",
+		"--reflink=auto",
+	)
+}
+
+func runCp(src, dst string, flags ...string) error {
+	args := append([]string{}, flags...)
+	args = append(args, src, dst)
+	cmd := exec.Command("cp", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cp %v: %w: %s", args, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
