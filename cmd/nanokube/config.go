@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanokube/internal/config"
@@ -23,9 +24,25 @@ func newConfigPrintDefaultsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "print-defaults",
 		Short: "Print a NanoKubeConfig with all defaults applied",
-		Args:  cobra.NoArgs,
+		Long: "Prints a multi-document YAML stream containing the " +
+			"NanoKubeConfig wrapper plus a defaulted kubeadm " +
+			"InitConfiguration / ClusterConfiguration suitable as a " +
+			"starting point for /etc/nanokube/config.yaml. Edit the " +
+			"emitted localAPIEndpoint.advertiseAddress to a routable IP " +
+			"before feeding the file to `nanokube init`.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			data, err := config.Marshal(v1alpha1.NewDefault())
+			kubeadmCfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+			if err != nil {
+				return fmt.Errorf("default kubeadm config: %w", err)
+			}
+			// DefaultedStaticInitConfiguration emits the kubeadm
+			// placeholder version ("v1.0.0-placeholder-version") so it
+			// works without internet access. Replace it with the image-
+			// pinned version so the emitted template is round-tripable
+			// through validate.
+			kubeadmCfg.ClusterConfiguration.KubernetesVersion = version.KubernetesVersion
+			data, err := config.Marshal(v1alpha1.NewDefault(), kubeadmCfg)
 			if err != nil {
 				return err
 			}
@@ -45,8 +62,8 @@ func newConfigValidateCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "config %s is valid (kubernetesVersion=%s, advertiseAddress=%s)\n",
-				g.configPath, version.KubernetesVersion, cfg.Spec.ControlPlane.AdvertiseAddress)
+			fmt.Fprintf(cmd.OutOrStdout(), "config %s is valid (kubernetesVersion=%s, advertiseAddress=%s, nodeName=%s)\n",
+				g.configPath, version.KubernetesVersion, cfg.LocalAPIEndpoint.AdvertiseAddress, cfg.NodeRegistration.Name)
 			return nil
 		},
 	}

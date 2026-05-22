@@ -1,19 +1,38 @@
-// Package config loads NanoKubeConfig from disk, applies defaults, and validates.
+// Package config loads a nanokube configuration file from disk and
+// returns it as kubeadm's internal *InitConfiguration. The on-disk
+// format is a multi-document YAML stream: one NanoKubeConfig wrapper
+// document plus the standard kubeadm InitConfiguration / Cluster
+// Configuration / KubeletConfiguration documents that nanokube hands
+// straight to kubeadm phases at runtime.
+//
+// Parsing of the kubeadm portion is delegated to kubeadm's own
+// BytesToInitConfiguration helper. That gives nanokube the upstream
+// defaulter, the upstream validator, and — critically — kubeadm's
+// deprecation warning path for older API versions (klog.Warningf
+// emitted by validateSupportedVersion) for free.
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
-// Load reads the config at path, applies defaults, and validates it.
-// Returns the fully-populated config on success.
-func Load(path string) (*v1alpha1.NanoKubeConfig, error) {
+// Load reads the multi-document YAML at path, parses both the
+// NanoKubeConfig wrapper and the sibling kubeadm documents, applies
+// defaults, validates, and returns the upstream kubeadm internal
+// InitConfiguration that downstream packages consume directly.
+func Load(path string) (*kubeadmapi.InitConfiguration, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -22,23 +41,118 @@ func Load(path string) (*v1alpha1.NanoKubeConfig, error) {
 }
 
 // LoadDefault reads the canonical /etc/nanokube/config.yaml.
-func LoadDefault() (*v1alpha1.NanoKubeConfig, error) {
+func LoadDefault() (*kubeadmapi.InitConfiguration, error) {
 	return Load(paths.ConfigFile)
 }
 
-func parse(data []byte, source string) (*v1alpha1.NanoKubeConfig, error) {
-	c := &v1alpha1.NanoKubeConfig{}
-	if err := yaml.UnmarshalStrict(data, c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", source, err)
+func parse(data []byte, source string) (*kubeadmapi.InitConfiguration, error) {
+	gvkmap, err := kubeadmutil.SplitConfigDocuments(data)
+	if err != nil {
+		return nil, fmt.Errorf("split %s: %w", source, err)
 	}
-	v1alpha1.SetDefaults(c)
-	if err := v1alpha1.Validate(c); err != nil {
+
+	// JoinConfiguration is unimplemented; reject early with a clear
+	// error rather than letting kubeadm parse a document we will never
+	// act on.
+	for gvk := range gvkmap {
+		if gvk.Group == kubeadmapiv1.SchemeGroupVersion.Group && gvk.Kind == "JoinConfiguration" {
+			return nil, fmt.Errorf("parse %s: JoinConfiguration is not supported yet; multi-node bootstrap is on the roadmap", source)
+		}
+	}
+
+	// Pull the nanokube wrapper out of the map before handing the rest
+	// to kubeadm. Otherwise kubeadm would emit an "Ignored configuration
+	// document" klog warning for our wrapper's GVK.
+	wrapper, err := extractWrapper(gvkmap, source)
+	if err != nil {
+		return nil, err
+	}
+	v1alpha1.SetDefaults(wrapper)
+
+	kubeadmBytes := concatDocs(gvkmap)
+	kubeadmCfg, err := kubeadmconfig.BytesToInitConfiguration(kubeadmBytes, false)
+	if err != nil {
+		return nil, fmt.Errorf("parse kubeadm portion of %s: %w", source, err)
+	}
+
+	if err := v1alpha1.Validate(wrapper, kubeadmCfg); err != nil {
 		return nil, fmt.Errorf("validate %s: %w", source, err)
 	}
-	return c, nil
+
+	// Pin the on-disk PKI location regardless of whether the user
+	// supplied a CertificatesDir. Validate has rejected an explicit
+	// non-matching value, so the only mismatch left is the empty default
+	// kubeadm filled in ("/etc/kubernetes/pki", which happens to equal
+	// paths.PKIDir today) — normalising here keeps every downstream
+	// reader on a single canonical path even if paths.PKIDir is
+	// retargeted in the future.
+	kubeadmCfg.CertificatesDir = paths.PKIDir
+	return kubeadmCfg, nil
 }
 
-// Marshal serialises the config as YAML for display or persistence.
-func Marshal(c *v1alpha1.NanoKubeConfig) ([]byte, error) {
-	return yaml.Marshal(c)
+func extractWrapper(gvkmap kubeadmapi.DocumentMap, source string) (*v1alpha1.NanoKubeConfig, error) {
+	nkGVK := schema.GroupVersionKind{
+		Group:   v1alpha1.GroupName,
+		Version: v1alpha1.Version,
+		Kind:    v1alpha1.Kind,
+	}
+	raw, ok := gvkmap[nkGVK]
+	if !ok {
+		return nil, fmt.Errorf("parse %s: required document %s (kind=%s) not found", source, v1alpha1.APIVersion, v1alpha1.Kind)
+	}
+	delete(gvkmap, nkGVK)
+
+	nk := &v1alpha1.NanoKubeConfig{}
+	if err := yaml.UnmarshalStrict(raw, nk); err != nil {
+		return nil, fmt.Errorf("parse %s NanoKubeConfig: %w", source, err)
+	}
+	return nk, nil
+}
+
+func concatDocs(gvkmap kubeadmapi.DocumentMap) []byte {
+	var buf bytes.Buffer
+	first := true
+	for _, b := range gvkmap {
+		if !first {
+			buf.WriteString("---\n")
+		}
+		buf.Write(b)
+		if len(b) == 0 || b[len(b)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+		first = false
+	}
+	return buf.Bytes()
+}
+
+// Marshal serialises a NanoKubeConfig wrapper plus a kubeadm
+// InitConfiguration as a multi-document YAML stream. The wrapper is
+// emitted via sigs.k8s.io/yaml; the kubeadm portion goes through
+// kubeadm's own MarshalInitConfigurationToBytes (which emits Init- and
+// ClusterConfiguration as separate documents and handles TypeMeta
+// inlining correctly).
+//
+// Used by `nanokube config print-defaults`. kubeadmCfg may be nil; in
+// that case only the wrapper is emitted.
+func Marshal(wrapper *v1alpha1.NanoKubeConfig, kubeadmCfg *kubeadmapi.InitConfiguration) ([]byte, error) {
+	wrapperBytes, err := yaml.Marshal(wrapper)
+	if err != nil {
+		return nil, fmt.Errorf("marshal wrapper: %w", err)
+	}
+	if kubeadmCfg == nil {
+		return wrapperBytes, nil
+	}
+	kubeadmBytes, err := kubeadmconfig.MarshalInitConfigurationToBytes(kubeadmCfg, kubeadmapiv1.SchemeGroupVersion)
+	if err != nil {
+		return nil, fmt.Errorf("marshal kubeadm portion: %w", err)
+	}
+
+	var buf bytes.Buffer
+	buf.Write(wrapperBytes)
+	if len(wrapperBytes) == 0 || wrapperBytes[len(wrapperBytes)-1] != '\n' {
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("---\n")
+	buf.Write(kubeadmBytes)
+	return buf.Bytes(), nil
 }

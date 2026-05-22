@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"os"
 
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/controlplane"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/etcd"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
-
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 )
 
 // Ensure runs the post-cert kubeadm phases that must hold true on every
@@ -25,12 +24,7 @@ import (
 // Note: super-admin.conf is deliberately NOT touched here.
 // initialize.WriteSuperAdminKubeconfig is the sole writer; recreating
 // it in a per-boot reconcile would defeat its post-init deletion.
-func Ensure(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) error {
-	kc, err := BuildInitConfiguration(cfg, layout, nodeName)
-	if err != nil {
-		return err
-	}
-
+func Ensure(cfg *kubeadmapi.InitConfiguration, layout Layout) error {
 	for _, dir := range []string{layout.ManifestsDir, layout.KubeletDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
@@ -41,13 +35,13 @@ func Ensure(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) error 
 	const isDryRun = false
 
 	if err := etcd.CreateLocalEtcdStaticPodManifestFile(
-		layout.ManifestsDir, patchesDir, nodeName, &kc.ClusterConfiguration, &kc.LocalAPIEndpoint, isDryRun,
+		layout.ManifestsDir, patchesDir, cfg.NodeRegistration.Name, &cfg.ClusterConfiguration, &cfg.LocalAPIEndpoint, isDryRun,
 	); err != nil {
 		return fmt.Errorf("create etcd manifest: %w", err)
 	}
 
 	if err := controlplane.CreateInitStaticPodManifestFiles(
-		layout.ManifestsDir, patchesDir, kc, isDryRun,
+		layout.ManifestsDir, patchesDir, cfg, isDryRun,
 	); err != nil {
 		return fmt.Errorf("create control plane manifests: %w", err)
 	}
@@ -56,16 +50,16 @@ func Ensure(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) error 
 	// WriteConfigToDisk reads the instance file as a patch when the
 	// NodeLocalCRISocket feature gate is on (GA+locked as of k8s v1.36),
 	// so the instance file must be written first.
-	if err := kubelet.WriteKubeletDynamicEnvFile(&kc.ClusterConfiguration, &kc.NodeRegistration, false, layout.KubeletDir); err != nil {
+	if err := kubelet.WriteKubeletDynamicEnvFile(&cfg.ClusterConfiguration, &cfg.NodeRegistration, false, layout.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet env file: %w", err)
 	}
 	instance := &kubeletconfigv1beta1.KubeletConfiguration{
-		ContainerRuntimeEndpoint: kc.NodeRegistration.CRISocket,
+		ContainerRuntimeEndpoint: cfg.NodeRegistration.CRISocket,
 	}
 	if err := kubelet.WriteInstanceConfigToDisk(instance, layout.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet instance config: %w", err)
 	}
-	if err := kubelet.WriteConfigToDisk(&kc.ClusterConfiguration, layout.KubeletDir, patchesDir, os.Stderr); err != nil {
+	if err := kubelet.WriteConfigToDisk(&cfg.ClusterConfiguration, layout.KubeletDir, patchesDir, os.Stderr); err != nil {
 		return fmt.Errorf("write kubelet config: %w", err)
 	}
 

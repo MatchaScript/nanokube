@@ -82,9 +82,9 @@ func TestNeedsRotation(t *testing.T) {
 }
 
 func TestCheckCAsReportsAllThree(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	if err := NewSigner(cfg, layout, "node-1").EnsureAll(); err != nil {
+	if err := NewSigner(cfg, layout).EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
 	report, err := CheckCAs(layout)
@@ -115,9 +115,9 @@ func TestCheckCAsReportsAllThree(t *testing.T) {
 // kubeconfig under the new issuer, and (c) leave the etcd CA and any
 // etcd-signed material untouched.
 func TestRegenerateCAClusterCascadesLeaves(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
@@ -170,9 +170,9 @@ func TestRegenerateCAClusterCascadesLeaves(t *testing.T) {
 }
 
 func TestRegenerateCAEtcdLeavesClusterAlone(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}

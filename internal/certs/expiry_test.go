@@ -5,17 +5,19 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestCheckLeavesReportsValidExpiry(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
 
-	report, err := CheckLeaves(cfg, layout, "node-1")
+	report, err := CheckLeaves(cfg, layout)
 	if err != nil {
 		t.Fatalf("CheckLeaves: %v", err)
 	}
@@ -26,22 +28,23 @@ func TestCheckLeavesReportsValidExpiry(t *testing.T) {
 	if api.NotFound {
 		t.Error("apiserver.crt reported as NotFound after EnsureAll")
 	}
-	// Default LeafValidityDays is 365; allow generous window for clock jitter.
+	// Default kubeadm leaf validity is 365 days; allow a generous window
+	// for clock jitter.
 	if api.Remaining < 360*24*time.Hour || api.Remaining > 365*24*time.Hour {
 		t.Errorf("apiserver Remaining=%v, expected ~365d", api.Remaining)
 	}
 }
 
 func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
 	// EnsureAll does not produce super-admin.conf — mirroring the
 	// production state during lifecycle.Boot.
-	report, err := CheckLeaves(cfg, layout, "node-1")
+	report, err := CheckLeaves(cfg, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,18 +61,18 @@ func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
 	}
 }
 
-// With LeafValidityDays = 1, every leaf trips NeedsRotation — exactly
+// With a 1-day leaf validity, every leaf trips NeedsRotation — exactly
 // the situation lifecycle.Boot must detect.
 func TestCheckLeavesFlagsExpiringLeavesAsBelowThreshold(t *testing.T) {
-	cfg := testConfig()
-	cfg.Spec.Certificates.LeafValidityDays = 1
+	cfg := testConfig(t)
+	cfg.CertificateValidityPeriod = &metav1.Duration{Duration: 24 * time.Hour}
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
 
-	report, err := CheckLeaves(cfg, layout, "node-1")
+	report, err := CheckLeaves(cfg, layout)
 	if err != nil {
 		t.Fatal(err)
 	}

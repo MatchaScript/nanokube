@@ -34,9 +34,15 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
 
-	"github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanokube/internal/paths"
 )
+
+// defaultCRISocket is the on-disk CRI endpoint nanokube installs talk to
+// (CRI-O ships in nanokube's bootc image). Hardcoded here rather than
+// read from NanoKubeConfig because reset must work even when the
+// configuration file is corrupt or absent — the socket path is a
+// property of the image, not the configuration.
+const defaultCRISocket = "unix:///var/run/crio/crio.sock"
 
 // Logger is a tiny printf-shaped sink. nil is treated as a no-op so
 // callers that do not care about progress output can pass nil.
@@ -100,7 +106,7 @@ func stopKubelet(ctx context.Context, logf Logger) {
 // Best-effort: an unreachable CRI socket or list/remove failure is
 // logged and skipped, matching `kubeadm reset`'s handling.
 func removeKubeContainers(logf Logger) {
-	rt := utilruntime.NewContainerRuntime(v1alpha1.DefaultCRISocket)
+	rt := utilruntime.NewContainerRuntime(defaultCRISocket)
 	if err := rt.Connect(); err != nil {
 		logf("connect CRI runtime (continuing): %v", err)
 		return

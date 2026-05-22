@@ -3,10 +3,9 @@ package kubeadm
 import (
 	"fmt"
 
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
-
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 )
 
 // WriteSuperAdminKubeconfig (re)writes /etc/kubernetes/super-admin.conf
@@ -23,13 +22,9 @@ import (
 // system:masters-bound and bypasses RBAC, so it must not exist on a
 // long-lived node. Letting Ensure recreate it on every boot would
 // silently undo the deletion in init.
-func WriteSuperAdminKubeconfig(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) error {
-	kc, err := BuildInitConfiguration(cfg, layout, nodeName)
-	if err != nil {
-		return err
-	}
+func WriteSuperAdminKubeconfig(cfg *kubeadmapi.InitConfiguration, layout Layout) error {
 	if err := kubeconfig.CreateKubeConfigFile(
-		kubeadmconstants.SuperAdminKubeConfigFileName, layout.KubeconfigDir, kc,
+		kubeadmconstants.SuperAdminKubeConfigFileName, layout.KubeconfigDir, cfg,
 	); err != nil {
 		return fmt.Errorf("create super-admin kubeconfig: %w", err)
 	}

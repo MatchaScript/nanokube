@@ -9,8 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
+
 	"github.com/MatchaScript/nanokube/internal/certs"
 	"github.com/MatchaScript/nanokube/internal/state"
 	"github.com/MatchaScript/nanokube/internal/testutil"
@@ -88,16 +92,16 @@ func TestBootFailed_WritesSteadyStateEvent(t *testing.T) {
 // the cert subsystem directly at the same lifecycle point and assert
 // the helper does the right thing in isolation.
 func TestRotateCertsIfStaleRotatesBelowThreshold(t *testing.T) {
-	cfg := newTestConfigWithShortLeaves()
+	cfg := newTestConfigWithShortLeaves(t)
 	layout := newTestCertsLayout(t)
 
-	signer := certs.NewSigner(cfg, layout, "node-1")
+	signer := certs.NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
 	apiBefore := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
 
-	if err := rotateCertsIfStale(cfg, layout, "node-1", io.Discard); err != nil {
+	if err := rotateCertsIfStale(cfg, layout, io.Discard); err != nil {
 		t.Fatalf("rotateCertsIfStale: %v", err)
 	}
 
@@ -110,16 +114,16 @@ func TestRotateCertsIfStaleRotatesBelowThreshold(t *testing.T) {
 // Default validity (1 year) is well above the 4-month threshold, so
 // the helper must be a no-op — no I/O on the leaf cert files.
 func TestRotateCertsIfStaleNoopOnFreshCerts(t *testing.T) {
-	cfg := newTestConfig()
+	cfg := newTestConfig(t)
 	layout := newTestCertsLayout(t)
 
-	signer := certs.NewSigner(cfg, layout, "node-1")
+	signer := certs.NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
 	apiBefore := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
 
-	if err := rotateCertsIfStale(cfg, layout, "node-1", io.Discard); err != nil {
+	if err := rotateCertsIfStale(cfg, layout, io.Discard); err != nil {
 		t.Fatalf("rotateCertsIfStale: %v", err)
 	}
 
@@ -131,24 +135,24 @@ func TestRotateCertsIfStaleNoopOnFreshCerts(t *testing.T) {
 
 // helpers — local to lifecycle test package.
 
-func newTestConfig() *v1alpha1.NanoKubeConfig {
-	c := &v1alpha1.NanoKubeConfig{
-		Metadata: v1alpha1.ObjectMeta{Name: "test"},
-		Spec: v1alpha1.NanoKubeConfigSpec{
-			ControlPlane: v1alpha1.ControlPlaneSpec{AdvertiseAddress: "192.168.10.10"},
-			Certificates: v1alpha1.CertificatesSpec{
-				SelfSigned: true,
-				ExtraSANs:  []string{"nanokube.local", "10.0.0.5"},
-			},
-		},
+func newTestConfig(t *testing.T) *kubeadmapi.InitConfiguration {
+	t.Helper()
+	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
 	}
-	v1alpha1.SetDefaults(c)
-	return c
+	cfg.NodeRegistration.Name = "test-node"
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.168.10.10"
+	cfg.LocalAPIEndpoint.BindPort = 6443
+	cfg.APIServer.CertSANs = []string{"nanokube.local", "10.0.0.5"}
+	cfg.CACertificateValidityPeriod = &metav1.Duration{Duration: 3650 * 24 * time.Hour}
+	cfg.CertificateValidityPeriod = &metav1.Duration{Duration: 365 * 24 * time.Hour}
+	return cfg
 }
 
-func newTestConfigWithShortLeaves() *v1alpha1.NanoKubeConfig {
-	c := newTestConfig()
-	c.Spec.Certificates.LeafValidityDays = 1
+func newTestConfigWithShortLeaves(t *testing.T) *kubeadmapi.InitConfiguration {
+	c := newTestConfig(t)
+	c.CertificateValidityPeriod = &metav1.Duration{Duration: 24 * time.Hour}
 	return c
 }
 

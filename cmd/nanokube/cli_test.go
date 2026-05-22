@@ -61,11 +61,20 @@ func TestCLI_ValidateRejectsBadConfig(t *testing.T) {
 	cfg := filepath.Join(dir, "bad.yaml")
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
-spec:
-  controlPlane:
-    advertiseAddress: "not-an-ip"
-  certificates:
-    selfSigned: true
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "not-an-ip"
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
 `
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -74,8 +83,8 @@ spec:
 	if err == nil {
 		t.Fatal("validate of bad config = nil; want error")
 	}
-	if !strings.Contains(err.Error(), "advertiseAddress") {
-		t.Errorf("error = %v; want advertiseAddress mention", err)
+	if !strings.Contains(err.Error(), "advertise") {
+		t.Errorf("error = %v; want advertise-address mention", err)
 	}
 }
 
@@ -98,11 +107,20 @@ func TestCLI_InitRefusesWhenStateExists(t *testing.T) {
 	cfg := filepath.Join(dir, "config.yaml")
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
-spec:
-  controlPlane:
-    advertiseAddress: 192.168.1.10
-  certificates:
-    selfSigned: true
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.1.10
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
 `
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

@@ -3,23 +3,32 @@ package certs
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 )
 
-func testConfig() *v1alpha1.NanoKubeConfig {
-	c := &v1alpha1.NanoKubeConfig{
-		Metadata: v1alpha1.ObjectMeta{Name: "test"},
-		Spec: v1alpha1.NanoKubeConfigSpec{
-			ControlPlane: v1alpha1.ControlPlaneSpec{AdvertiseAddress: "192.168.10.10"},
-			Certificates: v1alpha1.CertificatesSpec{
-				SelfSigned: true,
-				ExtraSANs:  []string{"nanokube.local", "10.0.0.5"},
-			},
-		},
+// testConfig returns a fully-defaulted *InitConfiguration with the
+// nanokube-specific overrides tests rely on. Defaulting goes through
+// kubeadm's DefaultedStaticInitConfiguration so the fixture matches
+// the shape config.Load produces in production — in particular
+// Etcd.Local is non-nil, which kubeadm's PKI phases require to
+// generate the etcd CA tree.
+func testConfig(t *testing.T) *kubeadmapi.InitConfiguration {
+	t.Helper()
+	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
 	}
-	v1alpha1.SetDefaults(c)
-	return c
+	cfg.NodeRegistration.Name = "test-node"
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.168.10.10"
+	cfg.LocalAPIEndpoint.BindPort = 6443
+	cfg.APIServer.CertSANs = []string{"nanokube.local", "10.0.0.5"}
+	cfg.CACertificateValidityPeriod = &metav1.Duration{Duration: 3650 * 24 * time.Hour}
+	cfg.CertificateValidityPeriod = &metav1.Duration{Duration: 365 * 24 * time.Hour}
+	return cfg
 }
 
 func testLayout(t *testing.T) Layout {

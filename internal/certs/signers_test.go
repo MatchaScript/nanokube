@@ -12,10 +12,10 @@ import (
 )
 
 func TestEnsureAllProducesPKIAndKubeconfigsFromScratch(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
 
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
@@ -46,9 +46,9 @@ func TestEnsureAllProducesPKIAndKubeconfigsFromScratch(t *testing.T) {
 // (Mirrors the assertion in kubeadm/ensure_test.go's
 // TestEnsureDoesNotProduceSuperAdminKubeconfig.)
 func TestEnsureAllDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatalf("EnsureAll: %v", err)
 	}
@@ -58,9 +58,9 @@ func TestEnsureAllDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
 }
 
 func TestEnsureAllIsIdempotent(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +98,9 @@ func parseCertSerial(t *testing.T, path string) string {
 }
 
 func TestRenewLeavesRotatesTargetButNotCA(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
@@ -125,9 +125,9 @@ func TestRenewLeavesRotatesTargetButNotCA(t *testing.T) {
 }
 
 func TestRenewLeavesLeavesUntargetedCertsAlone(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}
@@ -189,9 +189,9 @@ func kubeconfigEmbeddedCertSerial(t *testing.T, path string) string {
 }
 
 func TestRenewLeavesCoversKubeconfigEmbeddedCert(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	signer := NewSigner(cfg, layout, "node-1")
+	signer := NewSigner(cfg, layout)
 	if err := signer.EnsureAll(); err != nil {
 		t.Fatal(err)
 	}

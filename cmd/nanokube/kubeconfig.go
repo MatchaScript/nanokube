@@ -40,11 +40,7 @@ func newKubeconfigSuperAdminCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			nodeName, err := defaultNodeName()
-			if err != nil {
-				return err
-			}
-			if err := kubeadm.WriteSuperAdminKubeconfig(cfg, kubeadm.DefaultLayout(), nodeName); err != nil {
+			if err := kubeadm.WriteSuperAdminKubeconfig(cfg, kubeadm.DefaultLayout()); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", paths.SuperAdminKubeconfig)

@@ -5,28 +5,28 @@ import (
 	"path/filepath"
 	"testing"
 
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
+
 	"github.com/MatchaScript/nanokube/internal/certs"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
 )
 
-// Local testConfig + testLayout helpers — the unexported ones in
-// ensure_test.go (package kubeadm) are not visible from the external
-// test package. Duplicating ~20 lines of trivial setup is the standard
-// Go cost of using `package foo_test` to break import cycles.
-func testConfig() *v1alpha1.NanoKubeConfig {
-	c := &v1alpha1.NanoKubeConfig{
-		Metadata: v1alpha1.ObjectMeta{Name: "test"},
-		Spec: v1alpha1.NanoKubeConfigSpec{
-			ControlPlane: v1alpha1.ControlPlaneSpec{AdvertiseAddress: "192.168.10.10"},
-			Certificates: v1alpha1.CertificatesSpec{
-				SelfSigned: true,
-				ExtraSANs:  []string{"nanokube.local", "10.0.0.5"},
-			},
-		},
+// Locally duplicated test helpers — package kubeadm_test can't see the
+// unexported helpers in ensure_test.go, and Go's idiomatic answer is to
+// duplicate the trivial setup rather than expose them through a real
+// package.
+func testInitConfig(t *testing.T) *kubeadmapi.InitConfiguration {
+	t.Helper()
+	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
 	}
-	v1alpha1.SetDefaults(c)
-	return c
+	cfg.NodeRegistration.Name = "test-node"
+	cfg.NodeRegistration.CRISocket = "unix:///var/run/crio/crio.sock"
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.168.10.10"
+	cfg.LocalAPIEndpoint.BindPort = 6443
+	return cfg
 }
 
 func testLayout(t *testing.T) kubeadm.Layout {
@@ -48,13 +48,14 @@ func certsLayout(l kubeadm.Layout) certs.Layout {
 }
 
 func TestEnsureProducesNonCertArtifacts(t *testing.T) {
-	cfg := testConfig()
+	cfg := testInitConfig(t)
 	layout := testLayout(t)
+	kubeadm.ApplyLayout(cfg, layout)
 
-	if err := certs.NewSigner(cfg, certsLayout(layout), "node-1").EnsureAll(); err != nil {
+	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll: %v", err)
 	}
-	if err := kubeadm.Ensure(cfg, layout, "node-1"); err != nil {
+	if err := kubeadm.Ensure(cfg, layout); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -78,12 +79,13 @@ func TestEnsureProducesNonCertArtifacts(t *testing.T) {
 // cluster-admins CRB is seeded. If Ensure were to recreate it, every
 // reconcile boot would silently undo init's deletion.
 func TestEnsureDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
-	cfg := testConfig()
+	cfg := testInitConfig(t)
 	layout := testLayout(t)
-	if err := certs.NewSigner(cfg, certsLayout(layout), "node-1").EnsureAll(); err != nil {
+	kubeadm.ApplyLayout(cfg, layout)
+	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll: %v", err)
 	}
-	if err := kubeadm.Ensure(cfg, layout, "node-1"); err != nil {
+	if err := kubeadm.Ensure(cfg, layout); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	path := filepath.Join(layout.KubeconfigDir, "super-admin.conf")
@@ -93,16 +95,17 @@ func TestEnsureDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
 }
 
 // WriteSuperAdminKubeconfig is the explicit, separate writer used by
-// initialize.Run and by `nanokube kubeconfig super-admin`. Together with
-// the test above it pins the contract: super-admin.conf only exists
-// when something explicitly asks for it.
+// initialize.Run and by `nanokube kubeconfig super-admin`. Together
+// with the test above it pins the contract: super-admin.conf only
+// exists when something explicitly asks for it.
 func TestWriteSuperAdminKubeconfigProducesFile(t *testing.T) {
-	cfg := testConfig()
+	cfg := testInitConfig(t)
 	layout := testLayout(t)
-	if err := certs.NewSigner(cfg, certsLayout(layout), "node-1").EnsureAll(); err != nil {
+	kubeadm.ApplyLayout(cfg, layout)
+	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll (prerequisite for CA): %v", err)
 	}
-	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout, "node-1"); err != nil {
+	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout); err != nil {
 		t.Fatalf("WriteSuperAdminKubeconfig: %v", err)
 	}
 	path := filepath.Join(layout.KubeconfigDir, "super-admin.conf")

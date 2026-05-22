@@ -9,9 +9,9 @@ import (
 // Init produces a self-signed PKI with no operator input. Every CA and
 // leaf is materialised under PKIDir.
 func TestInitSelfSignsAllCAs(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	layout := testLayout(t)
-	if err := Init(cfg, layout, "node-1"); err != nil {
+	if err := Init(cfg, layout); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	for _, p := range []string{

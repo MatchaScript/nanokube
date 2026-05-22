@@ -14,8 +14,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
-
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 )
 
 func pathExists(p string) (bool, error) {
@@ -91,8 +90,8 @@ type CAExpiry struct {
 // *x509.Certificate is also retrieved off disk so callers can feed it
 // to needsRotation, which decides short-vs-long-lived from cert
 // lifetime rather than a global constant.
-func CheckLeaves(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) (map[LeafKind]LeafExpiry, error) {
-	signer := NewSigner(cfg, layout, nodeName)
+func CheckLeaves(cfg *kubeadmapi.InitConfiguration, layout Layout) (map[LeafKind]LeafExpiry, error) {
+	signer := NewSigner(cfg, layout)
 	mgr, err := signer.renewalManager()
 	if err != nil {
 		return nil, err

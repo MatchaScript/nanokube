@@ -6,41 +6,29 @@ import (
 	"os"
 	"path/filepath"
 
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs/renewal"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
-
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
-	"github.com/MatchaScript/nanokube/internal/kubeadm"
 )
 
 // Signer issues and renews the cert material under Layout.PKIDir +
 // Layout.KubeconfigDir. Construct one per operation; instances are
-// cheap and stateless beyond the captured cfg/layout/nodeName.
+// cheap and stateless beyond the captured cfg/layout.
 type Signer struct {
-	cfg      *v1alpha1.NanoKubeConfig
-	layout   Layout
-	nodeName string
+	cfg    *kubeadmapi.InitConfiguration
+	layout Layout
 }
 
-// NewSigner returns a Signer scoped to the supplied layout. nodeName is
-// folded into kubeadm's InitConfiguration so that node-scoped fields
-// (kubelet client cert CN, kubelet kubeconfig server URL, etc.) are
-// populated correctly.
-func NewSigner(cfg *v1alpha1.NanoKubeConfig, layout Layout, nodeName string) *Signer {
-	return &Signer{cfg: cfg, layout: layout, nodeName: nodeName}
-}
-
-// kubeadmLayout converts our Layout into kubeadm.Layout so that
-// BuildInitConfiguration receives PKIDir/KubeconfigDir wired to the
-// same paths. The Manifests/Kubelet fields are unused by the cert path
-// and left blank — kubeadm.Ensure (called separately) supplies its own.
-func (s *Signer) kubeadmLayout() kubeadm.Layout {
-	return kubeadm.Layout{
-		PKIDir:        s.layout.PKIDir,
-		KubeconfigDir: s.layout.KubeconfigDir,
-	}
+// NewSigner returns a Signer scoped to the supplied layout. The kubeadm
+// InitConfiguration's CertificatesDir is normalised to layout.PKIDir
+// on a private copy so callers can reuse cfg with a different layout
+// elsewhere without aliasing problems.
+func NewSigner(cfg *kubeadmapi.InitConfiguration, layout Layout) *Signer {
+	own := *cfg // shallow copy; ClusterConfiguration is value-embedded
+	own.CertificatesDir = layout.PKIDir
+	return &Signer{cfg: &own, layout: layout}
 }
 
 // EnsureAll generates whatever CAs and leaf certificates are missing
@@ -52,18 +40,13 @@ func (s *Signer) kubeadmLayout() kubeadm.Layout {
 // a corrupt CA). super-admin.conf is intentionally not produced —
 // initialize.WriteSuperAdminKubeconfig is the sole writer.
 func (s *Signer) EnsureAll() error {
-	kc, err := kubeadm.BuildInitConfiguration(s.cfg, s.kubeadmLayout(), s.nodeName)
-	if err != nil {
-		return err
-	}
-
 	for _, dir := range []string{s.layout.PKIDir, s.layout.KubeconfigDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
 
-	if err := certs.CreatePKIAssets(kc); err != nil {
+	if err := certs.CreatePKIAssets(s.cfg); err != nil {
 		return fmt.Errorf("create PKI assets: %w", err)
 	}
 
@@ -73,7 +56,7 @@ func (s *Signer) EnsureAll() error {
 		kubeadmconstants.SchedulerKubeConfigFileName,
 		kubeadmconstants.KubeletKubeConfigFileName,
 	} {
-		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, kc); err != nil {
+		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, s.cfg); err != nil {
 			return fmt.Errorf("create kubeconfig %s: %w", name, err)
 		}
 	}
@@ -84,11 +67,7 @@ func (s *Signer) EnsureAll() error {
 // renewalManager is a small helper used by RenewLeaves and CheckLeaves.
 // Instantiated lazily because it loads the CA off disk.
 func (s *Signer) renewalManager() (*renewal.Manager, error) {
-	kc, err := kubeadm.BuildInitConfiguration(s.cfg, s.kubeadmLayout(), s.nodeName)
-	if err != nil {
-		return nil, err
-	}
-	mgr, err := renewal.NewManager(&kc.ClusterConfiguration, s.layout.KubeconfigDir)
+	mgr, err := renewal.NewManager(&s.cfg.ClusterConfiguration, s.layout.KubeconfigDir)
 	if err != nil {
 		return nil, fmt.Errorf("renewal manager: %w", err)
 	}
@@ -136,11 +115,6 @@ func (s *Signer) RenewLeaves(leaves []LeafKind) error {
 // invariant violation, and `nanokube kubeconfig super-admin` is the
 // documented path to re-issue it under the new CA.
 func (s *Signer) RegenerateCA(ca CAKind) error {
-	kc, err := kubeadm.BuildInitConfiguration(s.cfg, s.kubeadmLayout(), s.nodeName)
-	if err != nil {
-		return err
-	}
-
 	toDelete := []string{
 		caCertPath(s.layout, ca),
 		caKeyPath(s.layout, ca),
@@ -162,12 +136,12 @@ func (s *Signer) RegenerateCA(ca CAKind) error {
 		}
 	}
 
-	if err := certs.CreatePKIAssets(kc); err != nil {
+	if err := certs.CreatePKIAssets(s.cfg); err != nil {
 		return fmt.Errorf("create PKI assets for CA %s: %w", ca, err)
 	}
 
 	for _, name := range kubeconfigs {
-		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, kc); err != nil {
+		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, s.cfg); err != nil {
 			return fmt.Errorf("create kubeconfig %s: %w", name, err)
 		}
 	}

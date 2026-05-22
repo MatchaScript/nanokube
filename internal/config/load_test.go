@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
+	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
-// writeTempFile drops body into a fresh file under t.TempDir() and returns
-// its path.
+// writeTempFile drops body into a fresh file under t.TempDir() and
+// returns its path.
 func writeTempFile(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.yaml")
@@ -20,26 +21,42 @@ func writeTempFile(t *testing.T, body string) string {
 	return p
 }
 
-func TestLoad_MinimalConfigDefaultsAndValidates(t *testing.T) {
-	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
+// A minimum NanoKubeConfig wrapper plus the kubeadm InitConfiguration /
+// ClusterConfiguration documents nanokube expects. Any field worth
+// asserting on per-test is added by the caller via concatenation.
+const minimalConfig = `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
 metadata:
   name: local
-spec:
-  controlPlane:
-    advertiseAddress: 192.168.1.10
-  certificates:
-    selfSigned: true
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.1.10
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
 `
-	cfg, err := Load(writeTempFile(t, body))
+
+func TestLoad_MinimalConfigParsesAndDefaults(t *testing.T) {
+	cfg, err := Load(writeTempFile(t, minimalConfig))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Spec.ControlPlane.BindPort != v1alpha1.DefaultBindPort {
-		t.Errorf("defaults not applied; BindPort = %d", cfg.Spec.ControlPlane.BindPort)
+	if cfg.LocalAPIEndpoint.AdvertiseAddress != "192.168.1.10" {
+		t.Errorf("AdvertiseAddress = %q", cfg.LocalAPIEndpoint.AdvertiseAddress)
 	}
-	if cfg.Spec.ControlPlane.ServiceSubnet != v1alpha1.DefaultServiceSubnet {
-		t.Errorf("ServiceSubnet = %q", cfg.Spec.ControlPlane.ServiceSubnet)
+	if cfg.LocalAPIEndpoint.BindPort != 6443 {
+		t.Errorf("BindPort = %d; expected kubeadm default 6443", cfg.LocalAPIEndpoint.BindPort)
+	}
+	if cfg.CertificatesDir != paths.PKIDir {
+		t.Errorf("CertificatesDir = %q; want pinned %q", cfg.CertificatesDir, paths.PKIDir)
 	}
 }
 
@@ -53,19 +70,50 @@ func TestLoad_FileNotFoundSurfacesPath(t *testing.T) {
 	}
 }
 
-// UnmarshalStrict is load-bearing: it prevents typo'd field names (e.g.
-// "controllPlane") from silently becoming no-ops. Don't weaken it.
-func TestLoad_RejectsUnknownField(t *testing.T) {
-	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
-kind: NanoKubeConfig
-spec:
-  controlPlane:
-    advertiseAddress: 192.168.1.10
-  mysterious: value
+func TestLoad_RejectsMissingWrapper(t *testing.T) {
+	// Strip the NanoKubeConfig wrapper out of the minimal config.
+	body := strings.SplitN(minimalConfig, "---\n", 2)[1]
+	_, err := Load(writeTempFile(t, body))
+	if err == nil || !strings.Contains(err.Error(), "NanoKubeConfig") {
+		t.Fatalf("Load = %v; want NanoKubeConfig-not-found error", err)
+	}
+}
+
+// JoinConfiguration is unimplemented and should be rejected with a
+// clear message rather than silently parsed.
+func TestLoad_RejectsJoinConfiguration(t *testing.T) {
+	body := minimalConfig + `---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: aaaaaa.bbbbbbbbbbbbbbbb
+    apiServerEndpoint: 10.0.0.1:6443
+    unsafeSkipCAVerification: true
 `
 	_, err := Load(writeTempFile(t, body))
-	if err == nil {
-		t.Fatal("strict parse must reject unknown fields")
+	if err == nil || !strings.Contains(err.Error(), "JoinConfiguration") {
+		t.Fatalf("Load = %v; want JoinConfiguration-not-supported error", err)
+	}
+}
+
+func TestLoad_RejectsCertificatesDirOverride(t *testing.T) {
+	body := minimalConfig + "certificatesDir: /tmp/elsewhere\n"
+	_, err := Load(writeTempFile(t, body))
+	if err == nil || !strings.Contains(err.Error(), "certificatesDir") {
+		t.Fatalf("Load = %v; want certificatesDir mismatch error", err)
+	}
+}
+
+func TestLoad_RejectsMismatchedKubernetesVersion(t *testing.T) {
+	// Use a syntactically valid Kubernetes version that does not match
+	// the one pinned in this image — kubeadm itself rejects unparseable
+	// values (e.g. v0.0.1-evil) before our gate runs, so the gate-under
+	// -test is only reachable with a version kubeadm accepts.
+	body := strings.Replace(minimalConfig, "kubernetesVersion: v1.35.0", "kubernetesVersion: v1.34.0", 1)
+	_, err := Load(writeTempFile(t, body))
+	if err == nil || !strings.Contains(err.Error(), "kubernetesVersion") {
+		t.Fatalf("Load = %v; want kubernetesVersion mismatch error", err)
 	}
 }
 
@@ -77,47 +125,59 @@ func TestLoad_MalformedYAML(t *testing.T) {
 	}
 }
 
-// Load must call Validate after SetDefaults; a semantically invalid
-// configuration is rejected even though it parses.
-func TestLoad_BubblesValidationError(t *testing.T) {
+// kubeadm's loader (validateSupportedVersion) emits a klog.Warningf for
+// deprecated API versions. We don't assert on klog output (capturing
+// requires plumbing -log_dir / klog.SetOutput in a test-hostile way);
+// instead pin the behaviour that v1beta3 still loads successfully,
+// which catches the day kubeadm drops support and Load starts
+// returning an error.
+func TestLoad_DeprecatedAPIVersionStillLoads(t *testing.T) {
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
-spec:
-  controlPlane:
-    advertiseAddress: "not-an-ip"
-  certificates:
-    selfSigned: true
+metadata:
+  name: local
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.1.10
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
 `
 	_, err := Load(writeTempFile(t, body))
-	if err == nil {
-		t.Fatal("Load of invalid IP = nil")
-	}
-	if !strings.Contains(err.Error(), "advertiseAddress") {
-		t.Errorf("error should mention advertiseAddress: %v", err)
+	if err != nil {
+		t.Fatalf("Load(v1beta3) = %v; v1beta3 should still be accepted with a deprecation warning. "+
+			"If kubeadm has dropped v1beta3 support, update this test together with the README to "+
+			"document the new minimum supported version.", err)
 	}
 }
 
 func TestMarshal_RoundTripsThroughLoad(t *testing.T) {
-	in := v1alpha1.NewDefault()
-	in.Spec.ControlPlane.AdvertiseAddress = "10.20.30.40"
-	in.Spec.Certificates.ExtraSANs = []string{"127.0.0.1", "nanokube.local"}
+	in, err := Load(writeTempFile(t, minimalConfig))
+	if err != nil {
+		t.Fatalf("Load(minimal): %v", err)
+	}
 
-	data, err := Marshal(in)
+	// Marshal needs the wrapper too; reconstruct a default one since
+	// the loader does not preserve the wrapper (its Spec is empty).
+	data, err := Marshal(v1alpha1.NewDefault(), in)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	path := writeTempFile(t, string(data))
-	out, err := Load(path)
+	out, err := Load(writeTempFile(t, string(data)))
 	if err != nil {
 		t.Fatalf("Load after Marshal: %v", err)
 	}
-
-	if out.Spec.ControlPlane.AdvertiseAddress != in.Spec.ControlPlane.AdvertiseAddress {
+	if out.LocalAPIEndpoint.AdvertiseAddress != in.LocalAPIEndpoint.AdvertiseAddress {
 		t.Errorf("advertiseAddress round-trip: %q -> %q",
-			in.Spec.ControlPlane.AdvertiseAddress, out.Spec.ControlPlane.AdvertiseAddress)
-	}
-	if len(out.Spec.Certificates.ExtraSANs) != 2 {
-		t.Errorf("extraSANs lost: got %v", out.Spec.Certificates.ExtraSANs)
+			in.LocalAPIEndpoint.AdvertiseAddress, out.LocalAPIEndpoint.AdvertiseAddress)
 	}
 }

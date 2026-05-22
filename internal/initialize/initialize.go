@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes"
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/markcontrolplane"
 
-	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanokube/internal/backup"
 	"github.com/MatchaScript/nanokube/internal/certs"
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
@@ -42,10 +42,17 @@ import (
 // Run executes the full one-time init. out receives human-readable
 // progress logs (operator's terminal during `nanokube init`). Returns
 // nil only if the cluster is verified healthy at function exit.
-func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersion string, out io.Writer) error {
+//
+// cfg is the kubeadm InitConfiguration parsed by config.Load; nanokube
+// does not add a configuration layer on top. NodeRegistration.Name has
+// already been filled in by kubeadm's SetNodeRegistrationDynamicDefaults
+// from the system hostname, so a separate nodeName argument is no
+// longer threaded through the call graph.
+func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[init] "+format+"\n", a...) }
 
 	layout := kubeadm.DefaultLayout()
+	nodeName := cfg.NodeRegistration.Name
 
 	isOSTree, err := ostree.IsOSTree()
 	if err != nil {
@@ -55,12 +62,12 @@ func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersio
 		return fmt.Errorf("preflight: %w", err)
 	}
 
-	if err := certs.Init(cfg, certsLayout(layout), nodeName); err != nil {
+	if err := certs.Init(cfg, certsLayout(layout)); err != nil {
 		return fmt.Errorf("certs init: %w", err)
 	}
 	logf("provisioned PKI under %s", layout.PKIDir)
 
-	if err := kubeadm.Ensure(cfg, layout, nodeName); err != nil {
+	if err := kubeadm.Ensure(cfg, layout); err != nil {
 		return fmt.Errorf("ensure: %w", err)
 	}
 	logf("rendered static pod manifests and kubelet config")
@@ -69,7 +76,7 @@ func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersio
 	// authenticate as system:masters; removeSuperAdminKubeconfig deletes
 	// it again before this function returns. Ensure deliberately does not
 	// produce super-admin.conf so reconcile boots cannot regenerate it.
-	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout, nodeName); err != nil {
+	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout); err != nil {
 		return err
 	}
 
@@ -96,12 +103,12 @@ func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersio
 		return err
 	}
 
-	if err := markcontrolplane.MarkControlPlane(client, nodeName, cfg.Spec.NodeRegistration.Taints); err != nil {
+	if err := markcontrolplane.MarkControlPlane(client, nodeName, cfg.NodeRegistration.Taints); err != nil {
 		return fmt.Errorf("mark control-plane: %w", err)
 	}
 	logf("marked control-plane node")
 
-	if err := kubeadm.EnsureAddons(cfg, layout, client, out); err != nil {
+	if err := kubeadm.EnsureAddons(cfg, client, out); err != nil {
 		return fmt.Errorf("addons: %w", err)
 	}
 
