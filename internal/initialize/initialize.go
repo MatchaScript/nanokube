@@ -35,6 +35,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
 	"github.com/MatchaScript/nanokube/internal/ostree"
 	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/preflight"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
 
@@ -50,7 +51,7 @@ func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersio
 	if err != nil {
 		return fmt.Errorf("detect ostree: %w", err)
 	}
-	if err := healthcheck.Preflight(isOSTree); err != nil {
+	if err := preflight.Preflight(isOSTree); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 

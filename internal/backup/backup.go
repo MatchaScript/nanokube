@@ -22,11 +22,18 @@
 //	    instance-config.yaml
 //	    kubeadm-flags.env
 //
-// Create and Restore both stage work under an intermediate
-// `<name>.tmp` / `<dst>.restoring` path and finalise with os.Rename,
-// mirroring microshift's AtomicDirCopy pattern
-// (reference/microshift/pkg/admin/data/atomic_dir_copy.go). A mid-run
-// crash therefore never leaves a half-written destination in place.
+// Create writes into a caller-owned staging directory and finalises
+// with os.Rename to atomically reveal the snapshot under its final
+// name; preflight.Workspace owns the staging dir and its cleanup, so
+// Create itself is a pure mechanism with no rollback responsibility.
+// A failed Create therefore returns the error and stops; the deferred
+// preflight cleanup wipes whatever partial copy is left in staging.
+// Restore stages per-target via `<dst>.restoring` siblings and
+// finalises with os.Rename, mirroring microshift's AtomicDirCopy
+// pattern (reference/microshift/pkg/admin/data/atomic_dir_copy.go);
+// it cleans its own staging on each failure path because the staging
+// lives at the production target's parent (e.g. /var/lib/etcd.restoring),
+// not in the preflight workspace.
 package backup
 
 import (
@@ -83,55 +90,48 @@ func Exists(name string) (bool, error) {
 }
 
 // Create snapshots the current on-disk state (etcd + kubernetes +
-// selected kubelet files) into backups/<Name(meta)>/, naming the backup
-// after the boot whose data is captured. If a backup with that name
-// already exists the call is a no-op.
-func Create(meta state.LastBoot) error {
+// selected kubelet files) into stagingDir, then atomically renames it
+// to finalDir. If finalDir already exists the call is a no-op
+// (idempotent on the same boot's meta).
+//
+// stagingDir MUST be a sibling of finalDir on the same filesystem and
+// MUST be pre-allocated empty by the caller (preflight.Workspace.BackupTmp
+// fulfils both contracts). On error Create returns and stops; cleanup of
+// any partial copy in stagingDir is the caller's responsibility, handled
+// uniformly by the deferred cleanup of the preflight-owned workspace.
+func Create(stagingDir, finalDir string, meta state.LastBoot) error {
 	if meta.DeploymentID == "" || meta.BootID == "" {
 		return errors.New("backup requires DeploymentID and BootID")
 	}
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
-		return err
-	}
-	name := Name(meta)
-	final := filepath.Join(paths.BackupsDir, name)
-	if exists, err := Exists(name); err != nil {
-		return err
-	} else if exists {
+	if _, err := os.Stat(finalDir); err == nil {
 		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", finalDir, err)
 	}
 
-	tmp := final + ".tmp"
-	if err := os.RemoveAll(tmp); err != nil {
-		return fmt.Errorf("clean stale %s: %w", tmp, err)
+	if err := copyDirIfExists(paths.EtcdDataDir, filepath.Join(stagingDir, "etcd")); err != nil {
+		return fmt.Errorf("copy etcd: %w", err)
 	}
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
-		return err
+	if err := copyDirIfExists(paths.KubernetesDir, filepath.Join(stagingDir, "kubernetes")); err != nil {
+		return fmt.Errorf("copy kubernetes: %w", err)
 	}
-
-	if err := copyDirIfExists(paths.EtcdDataDir, filepath.Join(tmp, "etcd")); err != nil {
-		return rollbackTmp(tmp, fmt.Errorf("copy etcd: %w", err))
-	}
-	if err := copyDirIfExists(paths.KubernetesDir, filepath.Join(tmp, "kubernetes")); err != nil {
-		return rollbackTmp(tmp, fmt.Errorf("copy kubernetes: %w", err))
-	}
-	kubeletDst := filepath.Join(tmp, "kubelet")
+	kubeletDst := filepath.Join(stagingDir, "kubelet")
 	if err := os.MkdirAll(kubeletDst, 0o700); err != nil {
-		return rollbackTmp(tmp, err)
+		return fmt.Errorf("mkdir kubelet: %w", err)
 	}
 	for _, f := range kubeletStateFiles {
 		src := filepath.Join(paths.KubeletDir, f)
 		dst := filepath.Join(kubeletDst, f)
 		if err := copyFileIfExists(src, dst); err != nil {
-			return rollbackTmp(tmp, fmt.Errorf("copy kubelet/%s: %w", f, err))
+			return fmt.Errorf("copy kubelet/%s: %w", f, err)
 		}
 	}
-	if err := writeMeta(tmp, meta); err != nil {
-		return rollbackTmp(tmp, fmt.Errorf("write meta: %w", err))
+	if err := writeMeta(stagingDir, meta); err != nil {
+		return fmt.Errorf("write meta: %w", err)
 	}
 
-	if err := os.Rename(tmp, final); err != nil {
-		return rollbackTmp(tmp, fmt.Errorf("rename %s -> %s: %w", tmp, final, err))
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", stagingDir, finalDir, err)
 	}
 	return nil
 }
@@ -363,13 +363,6 @@ func writeMeta(dir string, meta state.LastBoot) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, metaFileName), b, 0o600)
-}
-
-func rollbackTmp(tmp string, cause error) error {
-	if err := os.RemoveAll(tmp); err != nil {
-		return errors.Join(cause, fmt.Errorf("rollback cleanup: %w", err))
-	}
-	return cause
 }
 
 // restoreDir replaces dst with the contents of src via an intermediate

@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
@@ -71,6 +72,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
 	"github.com/MatchaScript/nanokube/internal/ostree"
 	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/preflight"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
 
@@ -86,18 +88,18 @@ import (
 func Boot(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[nanokube] "+format+"\n", a...) }
 
-	useBackups, err := ostree.IsOSTree()
+	// Preflight gates writability + free-space AND stages a clean
+	// workspace BEFORE Ensure / kubelet start. The defer cleanup() is
+	// the single point of truth for wiping any partial backup staging
+	// — backup.Create itself just returns errors and stops, never
+	// rolls back its own scratch. The cleanup is a no-op once a
+	// successful Create has renamed the staging dir to its final name.
+	workspace, cleanup, err := preflight.AllocateWorkspace()
 	if err != nil {
-		return fmt.Errorf("detect ostree: %w", err)
-	}
-
-	// Preflight gates writability + free-space BEFORE Ensure / kubelet
-	// start. The intent is that any failure path that reaches the tail
-	// state writes (where return-err triggers a greenboot rollback) is
-	// truly transient I/O — predictable failures are caught here first.
-	if err := healthcheck.Preflight(useBackups); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
+	defer cleanup()
+	useBackups := workspace.UseBackups
 
 	currentDeployment := ""
 	if useBackups {
@@ -131,7 +133,8 @@ func Boot(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersi
 	// restored; in that case the backup by this name already exists and
 	// Create skips.
 	if useBackups && hadPrev && prev.DeploymentID != "" && prev.BootID != "" && prev.BootID != currentBoot {
-		if err := backup.Create(prev); err != nil {
+		finalDir := filepath.Join(paths.BackupsDir, backup.Name(prev))
+		if err := backup.Create(workspace.BackupTmp, finalDir, prev); err != nil {
 			return fmt.Errorf("create backup: %w", err)
 		}
 		logf("snapshot of previous boot saved as %s", shortPair(prev.DeploymentID, prev.BootID))

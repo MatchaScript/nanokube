@@ -45,6 +45,28 @@ func fileContains(s, sub string) bool {
 	return false
 }
 
+// newStaging mirrors what preflight.AllocateWorkspace allocates for
+// backup.Create's pre-rename scratch area. Tests call this before each
+// Create to give it a freshly-empty staging dir on the same filesystem
+// as paths.BackupsDir, exactly as the production caller does.
+func newStaging(t *testing.T) string {
+	t.Helper()
+	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(paths.BackupsDir, ".staging")
+	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return staging
+}
+
+// finalDir is the on-disk path Create renames its staging into for meta.
+func finalDir(meta state.LastBoot) string {
+	return filepath.Join(paths.BackupsDir, Name(meta))
+}
+
 // seedLiveState populates the tempdir-rooted live trees with
 // representative content so Create has something to snapshot.
 func seedLiveState(t *testing.T) {
@@ -97,7 +119,9 @@ func TestCreate_RejectsEmptyMeta(t *testing.T) {
 		{},
 	}
 	for i, m := range cases {
-		if err := Create(m); err == nil {
+		// Use a throwaway staging path; meta validation must reject before
+		// Create touches the filesystem.
+		if err := Create(filepath.Join(paths.BackupsDir, ".staging"), finalDir(m), m); err == nil {
 			t.Errorf("case %d: Create(%+v) = nil; want error", i, m)
 		}
 	}
@@ -109,11 +133,11 @@ func TestCreate_CapturesAllThreeTrees(t *testing.T) {
 	seedLiveState(t)
 
 	meta := state.LastBoot{Version: "v1.35.0", DeploymentID: "dep1", BootID: "boot1"}
-	if err := Create(meta); err != nil {
+	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	backupRoot := filepath.Join(paths.BackupsDir, Name(meta))
+	backupRoot := finalDir(meta)
 	for _, rel := range []string{
 		"meta.json",
 		"etcd/member",
@@ -136,10 +160,10 @@ func TestCreate_IsIdempotent(t *testing.T) {
 	seedLiveState(t)
 
 	meta := state.LastBoot{Version: "v1.35.0", DeploymentID: "dep1", BootID: "boot1"}
-	if err := Create(meta); err != nil {
+	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
 		t.Fatal(err)
 	}
-	firstStat, err := os.Stat(filepath.Join(paths.BackupsDir, Name(meta), "meta.json"))
+	firstStat, err := os.Stat(filepath.Join(finalDir(meta), "meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,11 +173,11 @@ func TestCreate_IsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // ensure mtime would differ on a real rewrite
-	if err := Create(meta); err != nil {
+	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
 		t.Fatal(err)
 	}
 
-	secondStat, err := os.Stat(filepath.Join(paths.BackupsDir, Name(meta), "meta.json"))
+	secondStat, err := os.Stat(filepath.Join(finalDir(meta), "meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +185,7 @@ func TestCreate_IsIdempotent(t *testing.T) {
 		t.Errorf("Create overwrote existing backup (mtime changed)")
 	}
 
-	preserved, err := os.ReadFile(filepath.Join(paths.BackupsDir, Name(meta), "kubernetes/admin.conf"))
+	preserved, err := os.ReadFile(filepath.Join(finalDir(meta), "kubernetes/admin.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,28 +194,24 @@ func TestCreate_IsIdempotent(t *testing.T) {
 	}
 }
 
-// Failures mid-Create must not leave a `.tmp` artefact on disk. Simulate
-// by seeding only the kubernetes tree (etcd missing is fine — it's
-// optional on first boot), and asserting that after a successful Create
-// there is no stray .tmp alongside the final directory.
-func TestCreate_FailureRollsBackTmp(t *testing.T) {
+// Missing source trees (etcd absent on first boot) must not break
+// Create — copyDirIfExists tolerates absent sources. After success the
+// staging dir was renamed away, so it no longer exists alongside the
+// final dir.
+func TestCreate_TolerantOfMissingSources(t *testing.T) {
 	requireCp(t)
 	testutil.UseTempPaths(t)
 	// Deliberately do NOT call seedLiveState so that sources are missing.
-	// Create should still succeed because copyDirIfExists tolerates missing
-	// sources; we just assert no .tmp remains after success.
 	meta := state.LastBoot{DeploymentID: "d", BootID: "b"}
-	if err := Create(meta); err != nil {
+	staging := newStaging(t)
+	if err := Create(staging, finalDir(meta), meta); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	entries, err := os.ReadDir(paths.BackupsDir)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(finalDir(meta)); err != nil {
+		t.Fatalf("final dir missing after success: %v", err)
 	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".tmp" {
-			t.Errorf("leftover .tmp: %s", e.Name())
-		}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging dir survived rename: err=%v", err)
 	}
 }
 
@@ -201,7 +221,7 @@ func TestRestore_SwapsInBackupContents(t *testing.T) {
 	seedLiveState(t)
 
 	meta := state.LastBoot{Version: "v1", DeploymentID: "d", BootID: "b"}
-	if err := Create(meta); err != nil {
+	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +302,7 @@ func TestReadMeta_RoundTrip(t *testing.T) {
 	seedLiveState(t)
 
 	in := state.LastBoot{Version: "v9.9.9", DeploymentID: "deploy", BootID: "kern-boot"}
-	if err := Create(in); err != nil {
+	if err := Create(newStaging(t), finalDir(in), in); err != nil {
 		t.Fatal(err)
 	}
 	out, err := ReadMeta(Name(in))
