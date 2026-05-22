@@ -12,11 +12,13 @@ func newResetCmd(_ *globalOpts) *cobra.Command {
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "reset",
-		Short: "Tear down all nanokube-managed state (matches `kubeadm reset`)",
-		Long: "Stops kubelet, removes CRI containers and pod sandboxes, wipes " +
-			"/etc/kubernetes, /var/lib/etcd, /var/lib/kubelet, /var/lib/nanokube, " +
-			"deletes CNI network interfaces, and flushes iptables and ipvs rules. " +
-			"Intended for test beds or when re-initialising from scratch.",
+		Short: "Tear down all nanokube-managed state (matches `kubeadm reset --force`)",
+		Long: "Stops kubelet, lazy-unmounts /var/lib/kubelet, removes every CRI " +
+			"pod sandbox, and wipes /etc/kubernetes, /var/lib/etcd, " +
+			"/var/lib/kubelet, /var/lib/nanokube. Network state (CNI interfaces, " +
+			"iptables, IPVS, nftables) is left untouched — clean it up manually " +
+			"if you need a pristine slate. Intended for test beds or when " +
+			"re-initialising from scratch.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !confirm {
