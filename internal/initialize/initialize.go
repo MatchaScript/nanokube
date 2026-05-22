@@ -58,7 +58,7 @@ func Run(ctx context.Context, cfg *v1alpha1.NanoKubeConfig, nodeName, selfVersio
 	if err := certs.Init(cfg, certsLayout(layout), nodeName); err != nil {
 		return fmt.Errorf("certs init: %w", err)
 	}
-	logf("provisioned PKI under %s (BYOCA seed: %s)", layout.PKIDir, paths.OperatorCertsDir)
+	logf("provisioned PKI under %s", layout.PKIDir)
 
 	if err := kubeadm.Ensure(cfg, layout, nodeName); err != nil {
 		return fmt.Errorf("ensure: %w", err)
@@ -190,12 +190,10 @@ func waitControlPlane(ctx context.Context, client kubernetes.Interface, nodeName
 }
 
 // certsLayout maps the kubeadm.Layout used elsewhere in init onto the
-// certs package's Layout. PKIDir/KubeconfigDir match by construction;
-// OperatorDir comes from paths.OperatorCertsDir (the BYOCA seed).
+// certs package's Layout. PKIDir/KubeconfigDir match by construction.
 func certsLayout(l kubeadm.Layout) certs.Layout {
 	return certs.Layout{
 		PKIDir:        l.PKIDir,
 		KubeconfigDir: l.KubeconfigDir,
-		OperatorDir:   paths.OperatorCertsDir,
 	}
 }

@@ -28,7 +28,6 @@ func UseTempPaths(t *testing.T) string {
 
 	paths.ConfigDir = filepath.Join(root, "etc/nanokube")
 	paths.ConfigFile = filepath.Join(paths.ConfigDir, "config.yaml")
-	paths.OperatorCertsDir = filepath.Join(paths.ConfigDir, "certs")
 	paths.KubernetesDir = filepath.Join(root, "etc/kubernetes")
 	paths.PKIDir = filepath.Join(paths.KubernetesDir, "pki")
 	paths.EtcdPKIDir = filepath.Join(paths.PKIDir, "etcd")
@@ -56,7 +55,6 @@ func UseTempPaths(t *testing.T) string {
 
 type pathsSnapshot struct {
 	ConfigDir, ConfigFile                              string
-	OperatorCertsDir                                   string
 	KubernetesDir, PKIDir, EtcdPKIDir, ManifestsDir    string
 	KubeAPIServerManifest                              string
 	KubeconfigDir                                      string
@@ -65,14 +63,13 @@ type pathsSnapshot struct {
 	CMKubeconfig, SchedKubeconfig                      string
 	KubeletDir, KubeletConfigFile, KubeletFlagsEnvFile string
 	EtcdDataDir                                        string
-	NanoKubeVarDir, StateDir, BackupsDir                string
+	NanoKubeVarDir, StateDir, BackupsDir               string
 	LastBootFile, LastEventFile, RestoreMarker         string
 }
 
 func snapshot() pathsSnapshot {
 	return pathsSnapshot{
 		paths.ConfigDir, paths.ConfigFile,
-		paths.OperatorCertsDir,
 		paths.KubernetesDir, paths.PKIDir, paths.EtcdPKIDir, paths.ManifestsDir,
 		paths.KubeAPIServerManifest,
 		paths.KubeconfigDir,
@@ -89,7 +86,6 @@ func snapshot() pathsSnapshot {
 func restore(s pathsSnapshot) {
 	paths.ConfigDir = s.ConfigDir
 	paths.ConfigFile = s.ConfigFile
-	paths.OperatorCertsDir = s.OperatorCertsDir
 	paths.KubernetesDir = s.KubernetesDir
 	paths.PKIDir = s.PKIDir
 	paths.EtcdPKIDir = s.EtcdPKIDir

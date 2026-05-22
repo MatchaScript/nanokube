@@ -87,7 +87,7 @@ func TestBootFailed_WritesSteadyStateEvent(t *testing.T) {
 // to-end here (that would need systemd, kubelet, …); instead we drive
 // the cert subsystem directly at the same lifecycle point and assert
 // the helper does the right thing in isolation.
-func TestRenewLeavesIfStaleRotatesBelowThreshold(t *testing.T) {
+func TestRotateCertsIfStaleRotatesBelowThreshold(t *testing.T) {
 	cfg := newTestConfigWithShortLeaves()
 	layout := newTestCertsLayout(t)
 
@@ -97,19 +97,19 @@ func TestRenewLeavesIfStaleRotatesBelowThreshold(t *testing.T) {
 	}
 	apiBefore := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
 
-	if err := renewLeavesIfStale(cfg, layout, "node-1", io.Discard); err != nil {
-		t.Fatalf("renewLeavesIfStale: %v", err)
+	if err := rotateCertsIfStale(cfg, layout, "node-1", io.Discard); err != nil {
+		t.Fatalf("rotateCertsIfStale: %v", err)
 	}
 
 	apiAfter := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
 	if apiBefore == apiAfter {
-		t.Error("apiserver.crt unchanged after renewLeavesIfStale on a 1d-validity install; renewal did not trigger")
+		t.Error("apiserver.crt unchanged after rotateCertsIfStale on a 1d-validity install; renewal did not trigger")
 	}
 }
 
 // Default validity (1 year) is well above the 4-month threshold, so
 // the helper must be a no-op — no I/O on the leaf cert files.
-func TestRenewLeavesIfStaleNoopOnFreshCerts(t *testing.T) {
+func TestRotateCertsIfStaleNoopOnFreshCerts(t *testing.T) {
 	cfg := newTestConfig()
 	layout := newTestCertsLayout(t)
 
@@ -119,8 +119,8 @@ func TestRenewLeavesIfStaleNoopOnFreshCerts(t *testing.T) {
 	}
 	apiBefore := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
 
-	if err := renewLeavesIfStale(cfg, layout, "node-1", io.Discard); err != nil {
-		t.Fatalf("renewLeavesIfStale: %v", err)
+	if err := rotateCertsIfStale(cfg, layout, "node-1", io.Discard); err != nil {
+		t.Fatalf("rotateCertsIfStale: %v", err)
 	}
 
 	apiAfter := readSerial(t, filepath.Join(layout.PKIDir, "apiserver.crt"))
@@ -158,7 +158,6 @@ func newTestCertsLayout(t *testing.T) certs.Layout {
 	return certs.Layout{
 		PKIDir:        filepath.Join(root, "pki"),
 		KubeconfigDir: filepath.Join(root, "kubernetes"),
-		OperatorDir:   filepath.Join(root, "etc-nanokube-certs"),
 	}
 }
 

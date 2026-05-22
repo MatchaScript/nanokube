@@ -12,14 +12,6 @@ var (
 	ConfigDir  = "/etc/nanokube"
 	ConfigFile = ConfigDir + "/config.yaml"
 
-	// OperatorCertsDir is the optional BYOCA seed directory. Operators
-	// may place CA crt+key pairs here (cluster CA = ca.{crt,key},
-	// etcd CA = etcd/ca.{crt,key}, front-proxy CA = front-proxy-ca.{crt,key}).
-	// `nanokube init` copies what exists into PKIDir; absent files mean
-	// nanokube self-signs. Survives `nanokube reset` (Ownership model:
-	// operator source vs. build artifact).
-	OperatorCertsDir = ConfigDir + "/certs"
-
 	// KubernetesDir is the standard kubelet-facing tree.
 	KubernetesDir         = "/etc/kubernetes"
 	PKIDir                = KubernetesDir + "/pki"
@@ -50,8 +42,8 @@ var (
 	// backups). /var survives bootc rollback; we explicitly version
 	// sub-trees ourselves so rollback + restore is decoupled from /var.
 	NanoKubeVarDir = "/var/lib/nanokube"
-	StateDir      = NanoKubeVarDir + "/state"
-	BackupsDir    = NanoKubeVarDir + "/backups"
+	StateDir       = NanoKubeVarDir + "/state"
+	BackupsDir     = NanoKubeVarDir + "/backups"
 
 	// State files (under StateDir).
 	LastBootFile  = StateDir + "/last-boot.json"

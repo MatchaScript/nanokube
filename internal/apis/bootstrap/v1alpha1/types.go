@@ -24,7 +24,7 @@ type ObjectMeta struct {
 
 type NanoKubeConfig struct {
 	TypeMeta `json:",inline"`
-	Metadata ObjectMeta        `json:"metadata,omitempty"`
+	Metadata ObjectMeta         `json:"metadata,omitempty"`
 	Spec     NanoKubeConfigSpec `json:"spec"`
 }
 

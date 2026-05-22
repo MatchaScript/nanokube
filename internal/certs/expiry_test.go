@@ -58,9 +58,8 @@ func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
 	}
 }
 
-// With LeafValidityDays = 1, every leaf falls inside the 4-month
-// renewal threshold — exactly the situation lifecycle.Boot must
-// detect.
+// With LeafValidityDays = 1, every leaf trips NeedsRotation — exactly
+// the situation lifecycle.Boot must detect.
 func TestCheckLeavesFlagsExpiringLeavesAsBelowThreshold(t *testing.T) {
 	cfg := testConfig()
 	cfg.Spec.Certificates.LeafValidityDays = 1
@@ -78,13 +77,14 @@ func TestCheckLeavesFlagsExpiringLeavesAsBelowThreshold(t *testing.T) {
 		if leaf == LeafSuperAdminConf {
 			continue // not produced by EnsureAll
 		}
-		if report[leaf].NotFound {
+		exp := report[leaf]
+		if exp.NotFound {
 			t.Errorf("%s reported NotFound; expected present", leaf)
 			continue
 		}
-		if report[leaf].Remaining >= RenewalThreshold {
-			t.Errorf("%s Remaining=%v >= threshold %v; expected to fall below threshold with 1d validity",
-				leaf, report[leaf].Remaining, RenewalThreshold)
+		if !NeedsRotation(exp.Cert) {
+			t.Errorf("%s NeedsRotation=false (Remaining=%v); expected true with 1d validity",
+				leaf, exp.Remaining)
 		}
 	}
 }

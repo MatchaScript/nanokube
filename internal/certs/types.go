@@ -1,31 +1,26 @@
 // Package certs owns the lifecycle of /etc/kubernetes/pki and the
 // kubeconfig-embedded client certificates: initial issuance during
-// `nanokube init` (with optional BYOCA seeding from /etc/nanokube/certs)
-// and per-boot leaf renewal driven by the kubeadm renewal manager.
+// `nanokube init` (always self-signed by nanokube) and per-boot
+// rotation that handles both CA and leaf expiry.
 //
-// The package deliberately does NOT cover CA renewal: CA refresh is the
-// operator's responsibility (image rebuild + `nanokube reset`). Limiting
-// the automation surface to leaf renewal mirrors `kubeadm certs renew`'s
-// own scope and avoids cascading every leaf on every CA bump.
+// CA rotation is in scope: at boot, any CA whose remaining lifetime
+// has fallen below the rotation threshold is regenerated, and every
+// leaf signed by that CA is re-issued in the same pass. Leaves whose
+// CAs are still healthy are renewed in place via the kubeadm renewal
+// manager.
 package certs
-
-import "time"
 
 // Layout selects the on-disk locations the certs package reads/writes.
 // Production callers populate it from the paths package; tests use
 // t.TempDir-derived values.
 type Layout struct {
 	// PKIDir is /etc/kubernetes/pki — kubeadm's canonical certificatesDir
-	// and the destination of every CA copy + leaf issuance/renewal.
+	// and the destination of every CA + leaf issuance/renewal.
 	PKIDir string
 	// KubeconfigDir is /etc/kubernetes — where admin.conf / scheduler.conf
 	// etc. live. The renewal manager writes back into the same files when
 	// renewing the embedded client cert.
 	KubeconfigDir string
-	// OperatorDir is /etc/nanokube/certs — the optional BYOCA seed source.
-	// Files placed here are copied into PKIDir during `nanokube init`;
-	// absent files trigger self-signing.
-	OperatorDir string
 }
 
 // LeafKind enumerates every renewable leaf certificate the kubeadm
@@ -69,9 +64,62 @@ func AllLeaves() []LeafKind {
 	}
 }
 
-// RenewalThreshold is the leaf-cert remaining-lifetime window below
-// which lifecycle.Boot triggers a renewal before starting kubelet.
-// 4 months ≈ residual 33% on the default 1-year leaf, which is
-// generous enough that a host that boots monthly never approaches
-// expiry, while never renewing more than once per leaf-validity window.
-const RenewalThreshold = 120 * 24 * time.Hour
+// CAKind enumerates the three certificate authorities nanokube owns.
+// String values are PKI-dir-relative directories holding ca.{crt,key}.
+type CAKind string
+
+const (
+	CACluster    CAKind = "ca"             // signs apiserver + kubeconfig client certs (admin/cm/scheduler)
+	CAEtcd       CAKind = "etcd/ca"        // signs etcd/server, etcd/peer, etcd/healthcheck-client, apiserver-etcd-client
+	CAFrontProxy CAKind = "front-proxy-ca" // signs front-proxy-client
+)
+
+// AllCAs returns every CAKind in a stable order.
+func AllCAs() []CAKind {
+	return []CAKind{CACluster, CAEtcd, CAFrontProxy}
+}
+
+// dependentLeaves returns the PKI leaves whose signature chains back to
+// the given CA. Kubeconfig-embedded client certs are tracked separately
+// via dependentKubeconfigs; the split lets RegenerateCA delete
+// .crt+.key pairs for PKI leaves while deleting/recreating whole
+// kubeconfig YAML files for the rest.
+//
+// kubelet.conf is reported by dependentKubeconfigs but is not a
+// LeafKind: routine leaf-rotation flows ignore it (kubelet's CSR API
+// owns that), while CA-rotation flows must rewrite it (CSR rotation
+// can't run without a valid bootstrap cred).
+func dependentLeaves(ca CAKind) []LeafKind {
+	switch ca {
+	case CACluster:
+		return []LeafKind{
+			LeafAPIServer,
+			LeafAPIServerKubeletClient,
+		}
+	case CAEtcd:
+		return []LeafKind{
+			LeafEtcdServer,
+			LeafEtcdPeer,
+			LeafEtcdHealthcheckClient,
+			LeafAPIServerEtcdClient,
+		}
+	case CAFrontProxy:
+		return []LeafKind{LeafFrontProxyClient}
+	}
+	panic("unhandled CAKind: " + string(ca))
+}
+
+// dependentKubeconfigs returns the kubeconfig filenames whose embedded
+// client cert is signed by the given CA. Only the cluster CA signs
+// kubeconfigs; etcd and front-proxy CAs return nil.
+func dependentKubeconfigs(ca CAKind) []string {
+	if ca == CACluster {
+		return []string{
+			"admin.conf",
+			"controller-manager.conf",
+			"scheduler.conf",
+			"kubelet.conf",
+		}
+	}
+	return nil
+}

@@ -1,8 +1,10 @@
 package certs
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs"
@@ -113,8 +115,62 @@ func (s *Signer) RenewLeaves(leaves []LeafKind) error {
 			return fmt.Errorf("renew %s: %w", leaf, err)
 		}
 		if !renewed {
-			return fmt.Errorf("renew %s: skipped (externally managed CA — cannot renew without CA key)", leaf)
+			// Should be unreachable: nanokube always owns the CA key.
+			// A false return here means the kubeadm manager could not
+			// find a usable local CA, which is a programming error
+			// (PKI was not initialised) rather than a renewal outcome.
+			return fmt.Errorf("renew %s: renewal manager reported no-op despite local CA ownership", leaf)
 		}
 	}
+	return nil
+}
+
+// RegenerateCA deletes the named CA's .crt + .key together with every
+// PKI leaf signed by it and every kubeconfig whose embedded client
+// cert chains back to it, then re-runs kubeadm's CreatePKIAssets phase
+// (which re-creates the missing CA and re-signs the missing leaves)
+// followed by CreateKubeConfigFile for each affected kubeconfig.
+//
+// super-admin.conf is intentionally NOT regenerated: it is a
+// break-glass cred whose presence on a long-lived node is itself an
+// invariant violation, and `nanokube kubeconfig super-admin` is the
+// documented path to re-issue it under the new CA.
+func (s *Signer) RegenerateCA(ca CAKind) error {
+	kc, err := kubeadm.BuildInitConfiguration(s.cfg, s.kubeadmLayout(), s.nodeName)
+	if err != nil {
+		return err
+	}
+
+	toDelete := []string{
+		caCertPath(s.layout, ca),
+		caKeyPath(s.layout, ca),
+	}
+	for _, leaf := range dependentLeaves(ca) {
+		toDelete = append(toDelete, leafPath(s.layout, leaf))
+		if k := leafKeyPath(s.layout, leaf); k != "" {
+			toDelete = append(toDelete, k)
+		}
+	}
+	kubeconfigs := dependentKubeconfigs(ca)
+	for _, name := range kubeconfigs {
+		toDelete = append(toDelete, filepath.Join(s.layout.KubeconfigDir, name))
+	}
+
+	for _, p := range toDelete {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", p, err)
+		}
+	}
+
+	if err := certs.CreatePKIAssets(kc); err != nil {
+		return fmt.Errorf("create PKI assets for CA %s: %w", ca, err)
+	}
+
+	for _, name := range kubeconfigs {
+		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, kc); err != nil {
+			return fmt.Errorf("create kubeconfig %s: %w", name, err)
+		}
+	}
+
 	return nil
 }

@@ -28,6 +28,5 @@ func testLayout(t *testing.T) Layout {
 	return Layout{
 		PKIDir:        filepath.Join(root, "pki"),
 		KubeconfigDir: filepath.Join(root, "kubernetes"),
-		OperatorDir:   filepath.Join(root, "etc-nanokube-certs"),
 	}
 }
