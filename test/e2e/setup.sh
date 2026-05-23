@@ -171,29 +171,34 @@ install_nanokube_service() {
     install -m 0644 "$REPO_ROOT/packaging/systemd/nanokube.service" "$NANOK8S_SERVICE_UNIT"
     mkdir -p /etc/nanokube
     # Seed config.yaml from `nanokube config print-defaults` and override
-    # the fields that need to differ for single-node e2e:
-    #   - advertiseAddress: real primary IP, so the apiserver SAN matches.
-    #   - nodeRegistration.taints: empty list, so the lone control-plane
-    #     node is schedulable for the workload connectivity test (no
-    #     worker exists). Empty != nil — see v1alpha1.SetDefaults.
+    # the two fields that must differ for single-node e2e:
+    #
+    #   - InitConfiguration.localAPIEndpoint.advertiseAddress: real
+    #     primary IP, so the apiserver SAN matches.
+    #   - InitConfiguration.nodeRegistration.taints: empty list, so the
+    #     lone control-plane node is schedulable for the workload
+    #     connectivity test (no worker exists). kubeadm's default is
+    #     `taints: null` which means "use the default control-plane
+    #     taint"; we need an explicit empty list to override.
+    #
+    # The wrapper NanoKubeConfig and the kubeadm sub-documents are
+    # rendered as a multi-document YAML stream by `config print-defaults`
+    # — every field we touch lives in the kubeadm InitConfiguration doc
+    # at 2-space indent.
     local primary_ip
     primary_ip=$(hostname -I | awk '{print $1}')
     "$NANOK8S_BIN" config print-defaults \
-        | sed -E "s|^([[:space:]]+advertiseAddress:[[:space:]]).*$|\1$primary_ip|" \
-        | awk '
-            /^    taints:$/  { print "    taints: []"; in_taints=1; next }
-            in_taints && /^    -/  { next }
-            in_taints && /^      / { next }
-            { in_taints=0; print }
-          ' \
+        | sed -E \
+            -e "s|^(  advertiseAddress:[[:space:]]).*$|\1$primary_ip|" \
+            -e "s|^(  taints:)[[:space:]]+null$|\1 []|" \
         >"$NANOK8S_CONFIG"
     # Verify both rewrites landed. Failing either silently would yield
     # confusing downstream errors (apiserver SAN mismatch, or workload
     # Pending forever on an untolerated taint).
-    if ! grep -qE "^    advertiseAddress: $primary_ip$" "$NANOK8S_CONFIG"; then
+    if ! grep -qE "^  advertiseAddress: $primary_ip$" "$NANOK8S_CONFIG"; then
         die "failed to rewrite advertiseAddress in $NANOK8S_CONFIG"
     fi
-    if ! grep -qE "^    taints: \[\]$" "$NANOK8S_CONFIG"; then
+    if ! grep -qE "^  taints: \[\]$" "$NANOK8S_CONFIG"; then
         die "failed to flatten nodeRegistration.taints to [] in $NANOK8S_CONFIG"
     fi
     systemctl daemon-reload

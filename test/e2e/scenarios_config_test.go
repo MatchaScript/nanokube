@@ -29,47 +29,53 @@ func (s *NanokubeE2ESuite) Test01Config_PrintDefaultsIsValid() {
 	s.H.Nanokube("--config", tmp, "config", "validate")
 }
 
-// Test02Config_InvalidConfigRejected asserts that validate rejects a
-// config with a bad IP and a bad CRI socket scheme, and that the
-// error message names each offending field. Mirrors bash
-// :test_abnormal_invalid_config_rejected.
+// Test02Config_InvalidConfigRejected asserts validate rejects a config
+// with a bad advertiseAddress and names the offending field. The bash
+// original also asserted the error mentioned criSocket; that no longer
+// holds under the kubeadm multi-document schema (kubeadm's validator
+// fails fast on the first bad field and a non-scheme CRI URI only
+// trips a deprecation warning), so the assertion is narrowed to
+// advertiseAddress — the consistently-rejected case.
+// Mirrors bash :test_abnormal_invalid_config_rejected, adapted to the
+// post-23b7b53 schema.
 func (s *NanokubeE2ESuite) Test02Config_InvalidConfigRejected() {
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
 metadata:
   name: bad
-spec:
-  controlPlane:
-    advertiseAddress: "nope-not-an-ip"
-  runtime:
-    criSocket: "http://wrong-scheme"
-  certificates:
-    selfSigned: true
+spec: {}
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: nope-not-an-ip
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
 `
 	tmp := filepath.Join(s.T().TempDir(), "bad.yaml")
 	s.Require().NoError(os.WriteFile(tmp, []byte(body), 0o644))
 
 	stdout, stderr := s.H.NanokubeExpectFail("--config", tmp, "config", "validate")
-	combined := stdout + stderr
-	e2etest.AssertContains(s.T(), combined, "advertiseAddress", "validate error")
-	e2etest.AssertContains(s.T(), combined, "criSocket", "validate error")
+	// kubeadm reports the field via its CLI-flag name
+	// (apiserver-advertise-address); that substring keeps both "advertise"
+	// and "address" visible in the error so the assertion still verifies
+	// "the offending field is named".
+	e2etest.AssertContains(s.T(), stdout+stderr, "advertise-address", "validate error")
 }
 
-// Test03Config_UnknownFieldRejected asserts that an unknown top-level
-// field is rejected (UnmarshalStrict semantics).
-// Mirrors bash :test_abnormal_unknown_field_rejected.
+// Test03Config_UnknownFieldRejected asserts an unknown field under
+// spec is rejected (NanoKubeConfigSpec is empty {} now; any field is
+// strict-unknown). Mirrors bash :test_abnormal_unknown_field_rejected.
 func (s *NanokubeE2ESuite) Test03Config_UnknownFieldRejected() {
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
 spec:
-  controlPlane:
-    advertiseAddress: 192.168.1.10
-  typoField: "oops"
-  certificates:
-    selfSigned: true
+  typoField: oops
 `
 	tmp := filepath.Join(s.T().TempDir(), "typo.yaml")
 	s.Require().NoError(os.WriteFile(tmp, []byte(body), 0o644))
 
-	s.H.NanokubeExpectFail("--config", tmp, "config", "validate")
+	stdout, stderr := s.H.NanokubeExpectFail("--config", tmp, "config", "validate")
+	e2etest.AssertContains(s.T(), stdout+stderr, "typoField", "unknown-field error")
 }
