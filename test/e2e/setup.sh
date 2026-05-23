@@ -171,7 +171,7 @@ install_nanokube_service() {
     install -m 0644 "$REPO_ROOT/packaging/systemd/nanokube.service" "$NANOK8S_SERVICE_UNIT"
     mkdir -p /etc/nanokube
     # Seed config.yaml from `nanokube config print-defaults` and override
-    # the three fields that must differ for single-node e2e:
+    # the fields that must differ for single-node e2e:
     #
     #   - InitConfiguration.localAPIEndpoint.advertiseAddress: real
     #     primary IP, so the apiserver SAN matches.
@@ -185,23 +185,36 @@ install_nanokube_service() {
     #     kubeadm autodetect (which fires on any unset/empty criSocket)
     #     trips on "found multiple CRI endpoints" instead of using the
     #     CRI-O we just installed.
+    #   - InitConfiguration.nodeRegistration.name: bind to this host's
+    #     lowercased hostname. The print-defaults stub is `name: node`
+    #     so without an override every static pod would register as
+    #     `*-node` and assertions that look up `pod/etcd-<hostname>`
+    #     would not find them.
+    #   - ClusterConfiguration.networking.podSubnet: insert
+    #     10.244.0.0/16 so flannel (which we install in Test11) can
+    #     allocate pod IPs. kubeadm's default omits podSubnet entirely,
+    #     leaving flannel to CrashLoopBackOff with "Error registering
+    #     network: failed to acquire lease".
     #
     # The wrapper NanoKubeConfig and the kubeadm sub-documents are
     # rendered as a multi-document YAML stream by `config print-defaults`
-    # — every field we touch lives in the kubeadm InitConfiguration doc
-    # at 2-space indent.
-    local primary_ip
+    # — every InitConfiguration field we touch lives at 2-space indent.
+    local primary_ip lower_host
     primary_ip=$(hostname -I | awk '{print $1}')
+    lower_host=$(hostname | tr '[:upper:]' '[:lower:]')
     "$NANOK8S_BIN" config print-defaults \
         | sed -E \
             -e "s|^(  advertiseAddress:[[:space:]]).*$|\1$primary_ip|" \
             -e "s|^(  taints:)[[:space:]]+null$|\1 []|" \
             -e "s|^(  criSocket:[[:space:]]).*$|\1unix:///var/run/crio/crio.sock|" \
+            -e "s|^(  name:[[:space:]])node$|\1$lower_host|" \
+            -e "/^networking:$/a\\  podSubnet: 10.244.0.0/16" \
         >"$NANOK8S_CONFIG"
     # Verify every rewrite landed. Failing any silently would yield
     # confusing downstream errors (apiserver SAN mismatch, workload
     # Pending forever on an untolerated taint, kubelet talking to the
-    # wrong CRI).
+    # wrong CRI, static pods named after the wrong node, flannel
+    # crashloop from a missing pod CIDR).
     if ! grep -qE "^  advertiseAddress: $primary_ip$" "$NANOK8S_CONFIG"; then
         die "failed to rewrite advertiseAddress in $NANOK8S_CONFIG"
     fi
@@ -210,6 +223,12 @@ install_nanokube_service() {
     fi
     if ! grep -qE "^  criSocket: unix:///var/run/crio/crio.sock$" "$NANOK8S_CONFIG"; then
         die "failed to rewrite criSocket in $NANOK8S_CONFIG"
+    fi
+    if ! grep -qE "^  name: $lower_host$" "$NANOK8S_CONFIG"; then
+        die "failed to rewrite nodeRegistration.name in $NANOK8S_CONFIG"
+    fi
+    if ! grep -qE "^  podSubnet: 10\.244\.0\.0/16$" "$NANOK8S_CONFIG"; then
+        die "failed to insert podSubnet in $NANOK8S_CONFIG"
     fi
     systemctl daemon-reload
     log_info "nanokube config written (advertiseAddress=$primary_ip, taints=[])"

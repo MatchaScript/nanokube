@@ -6,9 +6,16 @@ import (
 	"github.com/MatchaScript/nanokube/test/e2etest"
 )
 
-// initArtifacts is the full set of paths `nanokube init` must produce.
-// Drift here is the most common e2e regression signal — keep this list
-// in sync with the kubeadm.Ensure + EnsureAddons output.
+// initArtifacts is the full set of paths `nanokube init` must produce
+// AND leave on disk by the time it returns. super-admin.conf is
+// deliberately NOT in this list: init writes it just-in-time to seed
+// the kubeadm:cluster-admins ClusterRoleBinding and removes it before
+// returning, so it never lingers on a long-lived node (see
+// initialize.Run + removeSuperAdminKubeconfig).
+//
+// Drift here is the most common e2e regression signal — keep this
+// list in sync with kubeadm.Ensure + EnsureAddons output minus init's
+// post-RBAC cleanup.
 var initArtifacts = []string{
 	"/etc/kubernetes/pki/ca.crt",
 	"/etc/kubernetes/pki/apiserver.crt",
@@ -16,7 +23,6 @@ var initArtifacts = []string{
 	"/etc/kubernetes/pki/etcd/server.crt",
 	"/etc/kubernetes/pki/sa.key",
 	"/etc/kubernetes/admin.conf",
-	"/etc/kubernetes/super-admin.conf",
 	"/etc/kubernetes/controller-manager.conf",
 	"/etc/kubernetes/scheduler.conf",
 	"/etc/kubernetes/kubelet.conf",
@@ -45,18 +51,13 @@ func (s *NanokubeE2ESuite) Test04Init_WritesAllArtifacts() {
 }
 
 // Test05Init_RefusesWhenStateExists asserts that re-running init
-// without --force refuses, protecting against accidental cert blow-away.
-// Depends on Test04 having created state. Mirrors bash
-// :test_abnormal_bootstrap_refuses_when_state_exists.
+// refuses when state already exists, protecting against accidental
+// cert blow-away. Depends on Test04 having created state. Mirrors
+// bash :test_abnormal_bootstrap_refuses_when_state_exists.
+//
+// (The bash suite also had a `bootstrap --force` overwrite test;
+// the current init CLI exposes no --force flag. The supported
+// recovery path is `reset --yes` then `init`, exercised by Test16.)
 func (s *NanokubeE2ESuite) Test05Init_RefusesWhenStateExists() {
 	s.H.NanokubeExpectFail("init")
-}
-
-// Test06Init_ForceOverwrites asserts that `init --force` is the
-// escape hatch and succeeds even when state.Exists().
-// Mirrors bash :test_normal_bootstrap_force_overwrites.
-func (s *NanokubeE2ESuite) Test06Init_ForceOverwrites() {
-	s.H.Nanokube("init", "--force")
-	e2etest.AssertFilePresent(s.T(),
-		"/etc/kubernetes/manifests/kube-apiserver.yaml", "force init")
 }
