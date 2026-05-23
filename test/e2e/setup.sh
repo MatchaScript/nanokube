@@ -4,16 +4,61 @@
 # CNI plugins, crictl, and kernel prerequisites (swap off, br_netfilter,
 # sysctls). Idempotent: safe to rerun on an already-configured host.
 #
-# Called once per E2E run (via e2e.sh); not intended to be invoked on its
-# own outside CI.
+# Called once per E2E run from the Go suite's SetupSuite (see
+# test/e2e/suite.go). Stays in bash because host provisioning is mostly
+# apt/curl/systemctl plumbing that gets no clearer in Go.
 
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=./lib.sh
-source "$SCRIPT_DIR/lib.sh"
-
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# ---------------------------------------------------------------------------
+# Versions, paths, helpers — previously lived in test/e2e/lib.sh which was
+# deleted when the bash test runner moved to Go. Inlined here so this script
+# stays self-contained.
+# ---------------------------------------------------------------------------
+
+# Pin every externally-fetched dependency. Adjust these together when bumping
+# the target Kubernetes minor; CRI-O is allowed to be one minor behind kubelet
+# (https://github.com/cri-o/cri-o/blob/main/compatibility-matrix.md).
+: "${KUBELET_VERSION:=v1.35.0}"
+: "${KUBECTL_VERSION:=v1.35.0}"
+: "${CRIO_VERSION:=v1.34}"
+: "${CNI_PLUGINS_VERSION:=v1.4.1}"
+: "${CRICTL_VERSION:=v1.34.0}"
+
+NANOK8S_BIN="${NANOK8S_BIN:-/usr/bin/nanokube}"
+NANOK8S_CONFIG=/etc/nanokube/config.yaml
+NANOK8S_SERVICE_UNIT=/etc/systemd/system/nanokube.service
+KUBELET_SERVICE_UNIT=/etc/systemd/system/kubelet.service
+CRIO_SERVICE=crio.service
+
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m'
+
+_log()     { printf '%s[%s]%s %s\n' "$1" "$2" "$NC" "$3"; }
+log_info() { _log "$GREEN"  INFO  "$*"; }
+log_warn() { _log "$YELLOW" WARN  "$*"; }
+log_step() { _log "$BLUE"   STEP  "$*"; }
+log_err()  { _log "$RED"    ERROR "$*" >&2; }
+die()      { log_err "$*"; exit 1; }
+
+# retry <attempts> <delay-sec> <cmd...> — succeeds on first 0-exit within the
+# budget; otherwise returns the last exit code.
+retry() {
+    local attempts=$1 delay=$2
+    shift 2
+    local i
+    for (( i = 1; i <= attempts; i++ )); do
+        if "$@"; then return 0; fi
+        if (( i < attempts )); then sleep "$delay"; fi
+    done
+    return 1
+}
 
 install_packages() {
     log_step "Installing base packages"
