@@ -44,14 +44,17 @@ jobs:
         run: go test -race -count=1 -timeout=3m ./...
 
   # ---------------------------------------------------------------------------
-  # Shell E2E — installs CRI-O, kubelet, kubectl on the runner and drives
-  # the full bootstrap → boot → workload → reset lifecycle. Slow (~10 min)
-  # and needs sudo, so kept in its own job that only gates merges.
+  # E2E suite — installs CRI-O, kubelet, kubectl on the runner via
+  # test/e2e/setup.sh, then drives the full init → boot → workload →
+  # reset lifecycle as a Go testify suite. Slow (~10 min) and needs sudo,
+  # so kept in its own job that only gates merges.
   # ---------------------------------------------------------------------------
   e2e:
     name: End-to-end suite
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      NANOKUBE_E2E_PREBUILT: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -67,21 +70,22 @@ jobs:
           go build -o bin/nanokube ./cmd/nanokube
           sudo install -m 0755 bin/nanokube /usr/bin/nanokube
 
+      - name: go vet (e2e tag)
+        run: go vet -tags e2e ./test/e2e/...
+
       - name: Run E2E suite
-        run: sudo -E bash ./test/e2e/e2e.sh full
-
-      - name: Collect journals on failure
-        if: failure()
         run: |
-          mkdir -p /tmp/e2e-journals
-          sudo journalctl -u crio.service --no-pager > /tmp/e2e-journals/crio.log    || true
-          sudo journalctl -u kubelet.service --no-pager > /tmp/e2e-journals/kubelet.log || true
-          sudo journalctl -u nanokube.service --no-pager > /tmp/e2e-journals/nanokube.log || true
+          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+            go test -tags e2e -v -timeout 24m -count=1 ./test/e2e/...
 
-      - name: Upload journals
+      - name: Make diagnostics readable
+        if: failure()
+        run: sudo chmod -R a+rX /tmp/nanokube-e2e-* || true
+
+      - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-journals
-          path: /tmp/e2e-journals/
+          name: e2e-diagnostics
+          path: /tmp/nanokube-e2e-*/
           if-no-files-found: ignore
