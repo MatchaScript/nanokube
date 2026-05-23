@@ -178,7 +178,9 @@ type TestingT interface {
 // testWriter is an io.Writer that forwards each Write to t.Logf,
 // streaming subprocess output through the test log rather than
 // buffering for failure-time dump.
-type testWriter struct{ t interface{ Logf(string, ...any) } }
+type testWriter struct {
+	t interface{ Logf(string, ...any) }
+}
 
 func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Logf("%s", strings.TrimRight(string(p), "\n"))

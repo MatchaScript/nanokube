@@ -243,4 +243,3 @@ func readFile(t *testing.T, path string) []byte {
 	}
 	return b
 }
-
