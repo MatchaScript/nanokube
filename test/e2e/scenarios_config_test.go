@@ -11,18 +11,26 @@ import (
 )
 
 // Test01Config_PrintDefaultsIsValid asserts `nanokube config
-// print-defaults` emits a valid starter template that, after the
-// advertiseAddress placeholder is filled in, passes `config validate`.
-// Mirrors test/e2e/e2e.sh:test_normal_print_defaults_is_valid.
+// print-defaults` emits a multi-document starter template (NanoKubeConfig
+// wrapper + kubeadm InitConfiguration) that passes `config validate`
+// after the advertiseAddress placeholder is filled in and criSocket is
+// pointed at this host's CRI runtime.
+// Mirrors test/e2e/e2e.sh:test_normal_print_defaults_is_valid, adapted
+// to the post-23b7b53 schema (the bespoke `selfSigned: true` field is
+// gone; cert-handling moved out of the wrapper).
 func (s *NanokubeE2ESuite) Test01Config_PrintDefaultsIsValid() {
 	out, _ := s.H.Nanokube("config", "print-defaults")
 	e2etest.AssertContains(s.T(), out, "apiVersion: bootstrap.nanokube.io/v1alpha1", "print-defaults")
-	e2etest.AssertContains(s.T(), out, "selfSigned: true", "print-defaults")
+	e2etest.AssertContains(s.T(), out, "kind: InitConfiguration", "print-defaults")
 
-	re := regexp.MustCompile(`(?m)^(\s+advertiseAddress:\s).*$`)
-	rewritten := re.ReplaceAllString(out, "${1}192.168.1.10")
+	rewritten := regexp.MustCompile(`(?m)^(\s+advertiseAddress:\s).*$`).
+		ReplaceAllString(out, "${1}192.168.1.10")
+	rewritten = regexp.MustCompile(`(?m)^(\s+criSocket:\s).*$`).
+		ReplaceAllString(rewritten, "${1}unix:///var/run/crio/crio.sock")
 	s.Require().Contains(rewritten, "advertiseAddress: 192.168.1.10",
-		"sed substitution failed on print-defaults output")
+		"sed substitution failed on advertiseAddress")
+	s.Require().Contains(rewritten, "criSocket: unix:///var/run/crio/crio.sock",
+		"sed substitution failed on criSocket")
 
 	tmp := filepath.Join(s.T().TempDir(), "defaults.yaml")
 	s.Require().NoError(os.WriteFile(tmp, []byte(rewritten), 0o644))
@@ -49,6 +57,8 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
   advertiseAddress: nope-not-an-ip
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration

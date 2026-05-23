@@ -171,7 +171,7 @@ install_nanokube_service() {
     install -m 0644 "$REPO_ROOT/packaging/systemd/nanokube.service" "$NANOK8S_SERVICE_UNIT"
     mkdir -p /etc/nanokube
     # Seed config.yaml from `nanokube config print-defaults` and override
-    # the two fields that must differ for single-node e2e:
+    # the three fields that must differ for single-node e2e:
     #
     #   - InitConfiguration.localAPIEndpoint.advertiseAddress: real
     #     primary IP, so the apiserver SAN matches.
@@ -180,6 +180,11 @@ install_nanokube_service() {
     #     connectivity test (no worker exists). kubeadm's default is
     #     `taints: null` which means "use the default control-plane
     #     taint"; we need an explicit empty list to override.
+    #   - InitConfiguration.nodeRegistration.criSocket: point at CRI-O.
+    #     The GitHub ubuntu-24.04 runner has containerd preinstalled, so
+    #     kubeadm autodetect (which fires on any unset/empty criSocket)
+    #     trips on "found multiple CRI endpoints" instead of using the
+    #     CRI-O we just installed.
     #
     # The wrapper NanoKubeConfig and the kubeadm sub-documents are
     # rendered as a multi-document YAML stream by `config print-defaults`
@@ -191,15 +196,20 @@ install_nanokube_service() {
         | sed -E \
             -e "s|^(  advertiseAddress:[[:space:]]).*$|\1$primary_ip|" \
             -e "s|^(  taints:)[[:space:]]+null$|\1 []|" \
+            -e "s|^(  criSocket:[[:space:]]).*$|\1unix:///var/run/crio/crio.sock|" \
         >"$NANOK8S_CONFIG"
-    # Verify both rewrites landed. Failing either silently would yield
-    # confusing downstream errors (apiserver SAN mismatch, or workload
-    # Pending forever on an untolerated taint).
+    # Verify every rewrite landed. Failing any silently would yield
+    # confusing downstream errors (apiserver SAN mismatch, workload
+    # Pending forever on an untolerated taint, kubelet talking to the
+    # wrong CRI).
     if ! grep -qE "^  advertiseAddress: $primary_ip$" "$NANOK8S_CONFIG"; then
         die "failed to rewrite advertiseAddress in $NANOK8S_CONFIG"
     fi
     if ! grep -qE "^  taints: \[\]$" "$NANOK8S_CONFIG"; then
         die "failed to flatten nodeRegistration.taints to [] in $NANOK8S_CONFIG"
+    fi
+    if ! grep -qE "^  criSocket: unix:///var/run/crio/crio.sock$" "$NANOK8S_CONFIG"; then
+        die "failed to rewrite criSocket in $NANOK8S_CONFIG"
     fi
     systemctl daemon-reload
     log_info "nanokube config written (advertiseAddress=$primary_ip, taints=[])"

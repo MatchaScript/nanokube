@@ -80,7 +80,14 @@ func (s *NanokubeE2ESuite) SetupSuite() {
 		s.runSetupScript()
 	}
 
-	s.H = e2etest.New(s.T(), e2etest.Config{
+	// H is (re)bound to the per-test t in SetupTest; this initial
+	// construction is just so helpers using the suite-level t (e.g. in
+	// SetupSuite itself, if ever added) don't dereference nil.
+	s.H = s.newHelpers()
+}
+
+func (s *NanokubeE2ESuite) newHelpers() *e2etest.Helpers {
+	return e2etest.New(s.T(), e2etest.Config{
 		Bin:        s.binPath,
 		Kubeconfig: s.kubeconfig,
 		NodeName:   s.nodeName,
@@ -102,16 +109,24 @@ func (s *NanokubeE2ESuite) TearDownSuite() {
 	}
 }
 
-// SetupTest sets up the per-test diagnostic subdirectory. State is NOT
-// reset between tests — the bash suite carries state through, so the
-// Go port follows the same model. TearDownTest collects diagnostics
-// only when a test fails.
+// SetupTest sets up the per-test diagnostic subdirectory and rebinds
+// the helpers to the per-test *testing.T. The rebind is critical:
+// testify swaps s.T() for each test method, but a helper captured in
+// SetupSuite would keep the suite-level t and any t.Fatalf call from
+// inside a test would FailNow the parent suite goroutine (printing
+// "subtest may have called FailNow on a parent test") instead of the
+// test, suppressing TearDownTest diagnostics.
+//
+// State is NOT reset between tests — the bash suite carries state
+// through, so the Go port follows the same model. TearDownTest
+// collects diagnostics only when a test fails.
 func (s *NanokubeE2ESuite) SetupTest() {
 	s.currentDir = filepath.Join(s.dumpRoot, s.T().Name())
 	if err := os.MkdirAll(s.currentDir, 0o755); err != nil {
 		s.T().Logf("setup: mkdir %s: %v", s.currentDir, err)
 	}
 	s.testStart = time.Now()
+	s.H = s.newHelpers()
 }
 
 // TearDownTest dumps diagnostics on failure and logs test duration.
