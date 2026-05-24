@@ -3,8 +3,12 @@
 // writes touch disk, so a transient disk-full or permission error never
 // causes greenboot to roll back a perfectly working cluster.
 //
-//	preinstall.go  install-time gate (writability probes + free-space
-//	               check). Used by `nanokube init`.
+//	preflight.go   shared gate (writability probes + free-space check)
+//	               and boot-only scratch allocation (AllocateWorkspace).
+//	               Boot calls Preflight then AllocateWorkspace.
+//	preinstall.go  install-time gate. Used by `nanokube init`; delegates
+//	               to Preflight today plus any init-only checks added
+//	               in the future.
 //
 // Both `nanokube init` and `nanokube boot` import this package; runtime
 // health (apiserver, cluster) lives in package healthcheck instead.

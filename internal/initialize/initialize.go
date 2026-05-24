@@ -58,7 +58,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 	if err != nil {
 		return fmt.Errorf("detect ostree: %w", err)
 	}
-	if err := preflight.Preflight(isOSTree); err != nil {
+	if err := preflight.Preinstall(isOSTree); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 

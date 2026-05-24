@@ -89,18 +89,26 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[nanokube] "+format+"\n", a...) }
 	nodeName := cfg.NodeRegistration.Name
 
-	// Preflight gates writability + free-space AND stages a clean
-	// workspace BEFORE Ensure / kubelet start. The defer cleanup() is
-	// the single point of truth for wiping any partial backup staging
-	// — backup.Create itself just returns errors and stops, never
-	// rolls back its own scratch. The cleanup is a no-op once a
-	// successful Create has renamed the staging dir to its final name.
-	workspace, cleanup, err := preflight.AllocateWorkspace()
+	// Preflight gates writability + free-space; AllocateWorkspace then
+	// stages a clean scratch dir BEFORE Ensure / kubelet start. The
+	// defer cleanup() is the single point of truth for wiping any
+	// partial backup staging — backup.Create itself just returns errors
+	// and stops, never rolls back its own scratch. The cleanup is a
+	// no-op once a successful Create has renamed the staging dir to its
+	// final name.
+	isOSTree, err := ostree.IsOSTree()
 	if err != nil {
+		return fmt.Errorf("detect ostree: %w", err)
+	}
+	if err := preflight.Preflight(isOSTree); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
+	workspace, cleanup, err := preflight.AllocateWorkspace(isOSTree)
+	if err != nil {
+		return fmt.Errorf("allocate workspace: %w", err)
+	}
 	defer cleanup()
-	useBackups := workspace.UseBackups
+	useBackups := isOSTree
 
 	currentDeployment := ""
 	if useBackups {
