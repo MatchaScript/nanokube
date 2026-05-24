@@ -1,8 +1,9 @@
 # nanokube
 
-Minimal, single-node Kubernetes runtime for bootc-style edge deployments.
-Upstream-Kubernetes positioned in the same niche as k0s; architecturally in
-the same niche as MicroShift, minus the OpenShift-specific layers.
+Single-node Kubernetes runtime for bootc-based hosts. nanokube wraps
+upstream kubeadm phases behind a small CLI (`init`, `config`, …) and
+expects the kubelet, CRI, and Kubernetes binaries to be supplied by the
+bootc image rather than installed at runtime.
 
 ## Configuration
 
