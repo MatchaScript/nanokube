@@ -4,7 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/MatchaScript/nanokube/internal/config"
-	"github.com/MatchaScript/nanokube/internal/lifecycle"
+	"github.com/MatchaScript/nanokube/internal/boot"
 	"github.com/MatchaScript/nanokube/internal/version"
 )
 
@@ -28,7 +28,7 @@ func newBootCmd(g *globalOpts) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			if err := lifecycle.Boot(ctx, cfg, version.KubernetesVersion, cmd.ErrOrStderr()); err != nil {
+			if err := boot.Run(ctx, cfg, g.layout, version.KubernetesVersion, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
 			// Healthy boot complete. Park here until systemd asks us to

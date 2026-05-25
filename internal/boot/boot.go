@@ -50,7 +50,7 @@
 // Non-ostree systems (no /run/ostree-booted) still run Ensure + kubelet
 // but skip backup/restore entirely; atomic rollback is physically
 // unavailable without an ostree/bootc deployment model.
-package lifecycle
+package boot
 
 import (
 	"context"
@@ -72,7 +72,6 @@ import (
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
 	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/ostree"
-	"github.com/MatchaScript/nanokube/internal/paths"
 	"github.com/MatchaScript/nanokube/internal/preflight"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
@@ -86,7 +85,7 @@ import (
 // only; super-admin.conf has been deleted by then and any operator who
 // regenerated it via `nanokube kubeconfig super-admin` is responsible
 // for cleaning it up themselves.
-func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion string, out io.Writer) error {
+func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[nanokube] "+format+"\n", a...) }
 	nodeName := cfg.NodeRegistration.Name
 
@@ -101,10 +100,17 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	if err != nil {
 		return fmt.Errorf("detect ostree: %w", err)
 	}
-	if err := preflight.Preflight(isOSTree); err != nil {
+	checks := []preflight.Preflighter{
+		preflight.FSWritable{Dirs: []string{l.NanoKubeVarDir, l.KubernetesDir}},
+		certs.CAExistPreflighter{Layout: l}, // CR9: gate Ensure on CA presence
+	}
+	if isOSTree {
+		checks = append(checks, backup.SpacePreflighter{Layout: l})
+	}
+	if err := preflight.Run(ctx, checks...); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
-	workspace, cleanup, err := preflight.AllocateWorkspace(isOSTree)
+	workspace, cleanup, err := backup.AllocateWorkspace(l, isOSTree)
 	if err != nil {
 		return fmt.Errorf("allocate workspace: %w", err)
 	}
@@ -127,12 +133,12 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	}
 
 	if useBackups {
-		if err := maybeRestore(currentDeployment, logf); err != nil {
+		if err := maybeRestore(l, currentDeployment, logf); err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}
 	}
 
-	prev, hadPrev, err := state.ReadLastBoot(layout.Default())
+	prev, hadPrev, err := state.ReadLastBoot(l)
 	if err != nil {
 		return err
 	}
@@ -143,8 +149,8 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// restored; in that case the backup by this name already exists and
 	// Create skips.
 	if useBackups && hadPrev && prev.DeploymentID != "" && prev.BootID != "" && prev.BootID != currentBoot {
-		finalDir := filepath.Join(paths.BackupsDir, backup.Name(prev))
-		if err := backup.Create(workspace.BackupTmp, finalDir, prev, layout.Default()); err != nil {
+		finalDir := filepath.Join(l.BackupsDir, backup.Name(prev))
+		if err := backup.Create(workspace.BackupTmp, finalDir, prev, l); err != nil {
 			return fmt.Errorf("create backup: %w", err)
 		}
 		logf("snapshot of previous boot saved as %s", shortPair(prev.DeploymentID, prev.BootID))
@@ -156,25 +162,25 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 		logf("first healthy boot pending (version=%s)", selfVersion)
 	case upgrading:
 		logf("upgrade path: %s -> %s", prev.Version, selfVersion)
-		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("upgrading %s -> %s", prev.Version, selfVersion))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("upgrading %s -> %s", prev.Version, selfVersion))
 	default:
 		logf("reconcile path (version=%s)", selfVersion)
 	}
 
-	if err := kubeadm.Ensure(cfg, layout.Default()); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
+	if err := kubeadm.Ensure(cfg, l); err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
 	}
 
-	if err := rotateCertsIfStale(cfg, layout.Default(), out); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
+	if err := rotateCertsIfStale(cfg, l, out); err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
 	if err := startKubelet(ctx, logf); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
+		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
-	if err := waitReadyz(ctx, logf); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
+	if err := waitReadyz(ctx, l, logf); err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
 	// admin.conf only: the cluster-admins CRB was seeded once during
@@ -183,9 +189,9 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// admin.conf cannot reach the apiserver and waitControlPlane will
 	// surface the failure — recovery is `nanokube reset` + `init`, not
 	// a silent fallback.
-	client, err := kubeclient.LoadAdmin(paths.AdminKubeconfig)
+	client, err := kubeclient.LoadAdmin(l.AdminKubeconfig)
 	if err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
+		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
 	// Beyond /readyz on the apiserver, confirm the node object reports
@@ -193,11 +199,11 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// Ready. Matches kinder's waitNewControlPlaneNodeReady and catches
 	// CM/scheduler crash-loops that /readyz alone would miss.
 	if err := waitControlPlane(ctx, client, nodeName, logf); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
+		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
 	if err := markcontrolplane.MarkControlPlane(client, nodeName, cfg.NodeRegistration.Taints); err != nil {
-		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
 	}
 
 	if err := kubeadm.EnsureAddons(cfg, client, out); err != nil {
@@ -207,7 +213,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	if useBackups {
 		if deployments, err := ostree.AllDeploymentIDs(); err != nil {
 			logf("list deployments failed (skipping prune): %v", err)
-		} else if err := backup.Prune(layout.Default(), deployments); err != nil {
+		} else if err := backup.Prune(l, deployments); err != nil {
 			logf("prune failed (continuing): %v", err)
 		}
 	}
@@ -220,7 +226,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// boot of stale `prev` next time around (snapshot may use an older
 	// name; backup.Create is idempotent on duplicates) — strictly less
 	// damaging than rolling back a healthy cluster.
-	if err := state.WriteLastBoot(layout.Default(), state.LastBoot{
+	if err := state.WriteLastBoot(l, state.LastBoot{
 		Version:      selfVersion,
 		DeploymentID: currentDeployment,
 		BootID:       currentBoot,
@@ -229,11 +235,11 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	}
 	switch {
 	case upgrading:
-		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
 	case !hadPrev:
-		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("initialised at %s", selfVersion))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("initialised at %s", selfVersion))
 	default:
-		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("healthy at %s", selfVersion))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("healthy at %s", selfVersion))
 	}
 	// Cluster is verified healthy. Notify systemd READY=1 so a blocking
 	// `systemctl start nanokube.service` returns only once the system is
@@ -254,8 +260,8 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 // and its meta.json is written to last-boot.json so the rest of this
 // boot sees the restored state as the "previous boot". The marker is
 // always cleared so a stray marker cannot cause repeated restores.
-func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
-	requested, err := backup.RestoreRequested(layout.Default())
+func maybeRestore(l layout.Layout, currentDeployment string, logf func(string, ...any)) error {
+	requested, err := backup.RestoreRequested(l)
 	if err != nil {
 		return err
 	}
@@ -263,38 +269,38 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 		return nil
 	}
 	defer func() {
-		if err := backup.ClearRestoreMarker(layout.Default()); err != nil {
+		if err := backup.ClearRestoreMarker(l); err != nil {
 			logf("clear restore marker failed: %v", err)
 		}
 	}()
 
 	if currentDeployment == "" {
 		logf("restore marker present but no booted deployment id; ignoring")
-		_ = state.WriteLastEvent(layout.Default(), "restore requested but no deployment id")
+		_ = state.WriteLastEvent(l, "restore requested but no deployment id")
 		return nil
 	}
-	name, err := backup.LatestForDeployment(layout.Default(), currentDeployment)
+	name, err := backup.LatestForDeployment(l, currentDeployment)
 	if err != nil {
 		return err
 	}
 	if name == "" {
 		logf("restore marker present but no backup for deployment %s", shortID(currentDeployment))
-		_ = state.WriteLastEvent(layout.Default(), "restore requested but no backup for current deployment")
+		_ = state.WriteLastEvent(l, "restore requested but no backup for current deployment")
 		return nil
 	}
 
 	logf("restoring backup %s", name)
-	if err := backup.Restore(layout.Default(), name); err != nil {
+	if err := backup.Restore(l, name); err != nil {
 		return err
 	}
-	meta, err := backup.ReadMeta(layout.Default(), name)
+	meta, err := backup.ReadMeta(l, name)
 	if err != nil {
 		return err
 	}
-	if err := state.WriteLastBoot(layout.Default(), meta); err != nil {
+	if err := state.WriteLastBoot(l, meta); err != nil {
 		return err
 	}
-	_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("restored backup %s", name))
+	_ = state.WriteLastEvent(l, fmt.Sprintf("restored backup %s", name))
 	return nil
 }
 
@@ -342,9 +348,9 @@ func startKubelet(ctx context.Context, logf func(string, ...any)) error {
 // boot-failed path.
 const readyzTimeout = 3 * time.Minute
 
-func waitReadyz(ctx context.Context, logf func(string, ...any)) error {
+func waitReadyz(ctx context.Context, l layout.Layout, logf func(string, ...any)) error {
 	logf("waiting for apiserver /readyz (timeout=%s)", readyzTimeout)
-	client, err := kubeclient.LoadAdmin(paths.AdminKubeconfig)
+	client, err := kubeclient.LoadAdmin(l.AdminKubeconfig)
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-package lifecycle
+package boot
 
 import (
 	"crypto/x509"
