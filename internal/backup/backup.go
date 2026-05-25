@@ -49,6 +49,7 @@ import (
 	"strings"
 	"time"
 
+	atomicpkg "github.com/MatchaScript/nanokube/internal/atomic"
 	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
@@ -378,6 +379,15 @@ func writeMeta(dir string, meta state.LastBoot) error {
 // restoreDir replaces dst with the contents of src via an intermediate
 // sibling of dst. When src is absent the backup did not cover this
 // tree (first-boot etcd case), so dst is wiped to keep restore total.
+//
+// CR1: uses atomic.SwapDir (RENAME_EXCHANGE) so the live data is never
+// in a half-state on disk. The old pattern `RemoveAll(dst) ->
+// Rename(staged, dst)` had a window where a power loss between the two
+// calls left dst gone — etcd-fatal. After SwapDir, the displaced data
+// is at `staged` and we RemoveAll it; if power loss happens between
+// the swap and the cleanup, the next boot finds a `.restoring` dir
+// next to the freshly-restored live tree which a startup helper can
+// safely delete (or which the next restore overwrites).
 func restoreDir(src, dst string) error {
 	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
 		if err := os.RemoveAll(dst); err != nil {
@@ -398,12 +408,15 @@ func restoreDir(src, dst string) error {
 		_ = os.RemoveAll(staged)
 		return err
 	}
-	if err := os.RemoveAll(dst); err != nil {
+	if err := atomicpkg.SwapDir(staged, dst); err != nil {
 		_ = os.RemoveAll(staged)
 		return err
 	}
-	if err := os.Rename(staged, dst); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", staged, dst, err)
+	// staged now holds the displaced old live data; drop it. If this
+	// fails we still have a valid live dst, so the failure is
+	// noisy-but-not-fatal — log via caller, do not bubble.
+	if err := os.RemoveAll(staged); err != nil {
+		return fmt.Errorf("remove displaced live %s: %w", staged, err)
 	}
 	return nil
 }
