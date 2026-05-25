@@ -3,8 +3,8 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/MatchaScript/nanokube/internal/config"
 	"github.com/MatchaScript/nanokube/internal/boot"
+	"github.com/MatchaScript/nanokube/internal/config"
 	"github.com/MatchaScript/nanokube/internal/version"
 )
 
