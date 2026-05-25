@@ -196,7 +196,7 @@ func TestRenewLeavesCoversKubeconfigEmbeddedCert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	adminPath := filepath.Join(layout.KubeconfigDir, "admin.conf")
+	adminPath := filepath.Join(layout.KubernetesDir, "admin.conf")
 	serialBefore := kubeconfigEmbeddedCertSerial(t, adminPath)
 
 	if err := signer.RenewLeaves([]LeafKind{LeafAdminConf}); err != nil {

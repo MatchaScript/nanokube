@@ -11,24 +11,26 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs/renewal"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
+
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
-// Signer issues and renews the cert material under Layout.PKIDir +
-// Layout.KubeconfigDir. Construct one per operation; instances are
+// Signer issues and renews the cert material under l.PKIDir +
+// l.KubernetesDir. Construct one per operation; instances are
 // cheap and stateless beyond the captured cfg/layout.
 type Signer struct {
 	cfg    *kubeadmapi.InitConfiguration
-	layout Layout
+	layout layout.Layout
 }
 
 // NewSigner returns a Signer scoped to the supplied layout. The kubeadm
-// InitConfiguration's CertificatesDir is normalised to layout.PKIDir
+// InitConfiguration's CertificatesDir is normalised to l.PKIDir
 // on a private copy so callers can reuse cfg with a different layout
 // elsewhere without aliasing problems.
-func NewSigner(cfg *kubeadmapi.InitConfiguration, layout Layout) *Signer {
+func NewSigner(cfg *kubeadmapi.InitConfiguration, l layout.Layout) *Signer {
 	own := *cfg // shallow copy; ClusterConfiguration is value-embedded
-	own.CertificatesDir = layout.PKIDir
-	return &Signer{cfg: &own, layout: layout}
+	own.CertificatesDir = l.PKIDir
+	return &Signer{cfg: &own, layout: l}
 }
 
 // EnsureAll generates whatever CAs and leaf certificates are missing
@@ -40,7 +42,7 @@ func NewSigner(cfg *kubeadmapi.InitConfiguration, layout Layout) *Signer {
 // a corrupt CA). super-admin.conf is intentionally not produced —
 // initialize.WriteSuperAdminKubeconfig is the sole writer.
 func (s *Signer) EnsureAll() error {
-	for _, dir := range []string{s.layout.PKIDir, s.layout.KubeconfigDir} {
+	for _, dir := range []string{s.layout.PKIDir, s.layout.KubernetesDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -56,7 +58,7 @@ func (s *Signer) EnsureAll() error {
 		kubeadmconstants.SchedulerKubeConfigFileName,
 		kubeadmconstants.KubeletKubeConfigFileName,
 	} {
-		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, s.cfg); err != nil {
+		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubernetesDir, s.cfg); err != nil {
 			return fmt.Errorf("create kubeconfig %s: %w", name, err)
 		}
 	}
@@ -67,7 +69,7 @@ func (s *Signer) EnsureAll() error {
 // renewalManager is a small helper used by RenewLeaves and CheckLeaves.
 // Instantiated lazily because it loads the CA off disk.
 func (s *Signer) renewalManager() (*renewal.Manager, error) {
-	mgr, err := renewal.NewManager(&s.cfg.ClusterConfiguration, s.layout.KubeconfigDir)
+	mgr, err := renewal.NewManager(&s.cfg.ClusterConfiguration, s.layout.KubernetesDir)
 	if err != nil {
 		return nil, fmt.Errorf("renewal manager: %w", err)
 	}
@@ -127,7 +129,7 @@ func (s *Signer) RegenerateCA(ca CAKind) error {
 	}
 	kubeconfigs := dependentKubeconfigs(ca)
 	for _, name := range kubeconfigs {
-		toDelete = append(toDelete, filepath.Join(s.layout.KubeconfigDir, name))
+		toDelete = append(toDelete, filepath.Join(s.layout.KubernetesDir, name))
 	}
 
 	for _, p := range toDelete {
@@ -141,7 +143,7 @@ func (s *Signer) RegenerateCA(ca CAKind) error {
 	}
 
 	for _, name := range kubeconfigs {
-		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubeconfigDir, s.cfg); err != nil {
+		if err := kubeconfig.CreateKubeConfigFile(name, s.layout.KubernetesDir, s.cfg); err != nil {
 			return fmt.Errorf("create kubeconfig %s: %w", name, err)
 		}
 	}

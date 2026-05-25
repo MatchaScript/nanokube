@@ -55,7 +55,7 @@ func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
 	if !sa.NotFound {
 		t.Errorf("super-admin.conf should be NotFound, got Remaining=%v", sa.Remaining)
 	}
-	saPath := filepath.Join(layout.KubeconfigDir, "super-admin.conf")
+	saPath := filepath.Join(layout.KubernetesDir, "super-admin.conf")
 	if _, err := os.Stat(saPath); err == nil {
 		t.Fatalf("test precondition violated: super-admin.conf exists at %s", saPath)
 	}

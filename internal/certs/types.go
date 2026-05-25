@@ -10,19 +10,6 @@
 // manager.
 package certs
 
-// Layout selects the on-disk locations the certs package reads/writes.
-// Production callers populate it from the paths package; tests use
-// t.TempDir-derived values.
-type Layout struct {
-	// PKIDir is /etc/kubernetes/pki — kubeadm's canonical certificatesDir
-	// and the destination of every CA + leaf issuance/renewal.
-	PKIDir string
-	// KubeconfigDir is /etc/kubernetes — where admin.conf / scheduler.conf
-	// etc. live. The renewal manager writes back into the same files when
-	// renewing the embedded client cert.
-	KubeconfigDir string
-}
-
 // LeafKind enumerates every renewable leaf certificate the kubeadm
 // renewal manager recognises. Values match the renewal manager's
 // internal name keys 1:1 (see kubeadm certs/renewal/manager.go), so a

@@ -127,8 +127,8 @@ func TestRegenerateCAClusterCascadesLeaves(t *testing.T) {
 	apiserverKubeletIssuerBefore := certIssuerSerial(t, leafPath(layout, LeafAPIServerKubeletClient))
 	etcdCAFingerprintBefore := certFingerprint(t, caCertPath(layout, CAEtcd))
 	etcdServerFingerprintBefore := certFingerprint(t, leafPath(layout, LeafEtcdServer))
-	adminConfBytesBefore := readFile(t, filepath.Join(layout.KubeconfigDir, "admin.conf"))
-	kubeletConfBytesBefore := readFile(t, filepath.Join(layout.KubeconfigDir, "kubelet.conf"))
+	adminConfBytesBefore := readFile(t, filepath.Join(layout.KubernetesDir, "admin.conf"))
+	kubeletConfBytesBefore := readFile(t, filepath.Join(layout.KubernetesDir, "kubelet.conf"))
 
 	if err := signer.RegenerateCA(CACluster); err != nil {
 		t.Fatalf("RegenerateCA(CACluster): %v", err)
@@ -149,15 +149,15 @@ func TestRegenerateCAClusterCascadesLeaves(t *testing.T) {
 	}
 
 	for _, name := range []string{"admin.conf", "controller-manager.conf", "scheduler.conf", "kubelet.conf"} {
-		path := filepath.Join(layout.KubeconfigDir, name)
+		path := filepath.Join(layout.KubernetesDir, name)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s missing after RegenerateCA: %v", name, err)
 		}
 	}
-	if bytes.Equal(adminConfBytesBefore, readFile(t, filepath.Join(layout.KubeconfigDir, "admin.conf"))) {
+	if bytes.Equal(adminConfBytesBefore, readFile(t, filepath.Join(layout.KubernetesDir, "admin.conf"))) {
 		t.Error("admin.conf unchanged after RegenerateCA(CACluster)")
 	}
-	if bytes.Equal(kubeletConfBytesBefore, readFile(t, filepath.Join(layout.KubeconfigDir, "kubelet.conf"))) {
+	if bytes.Equal(kubeletConfBytesBefore, readFile(t, filepath.Join(layout.KubernetesDir, "kubelet.conf"))) {
 		t.Error("kubelet.conf unchanged after RegenerateCA(CACluster)")
 	}
 
@@ -181,7 +181,7 @@ func TestRegenerateCAEtcdLeavesClusterAlone(t *testing.T) {
 	etcdServerIssuerBefore := certIssuerSerial(t, leafPath(layout, LeafEtcdServer))
 	clusterCABefore := certFingerprint(t, caCertPath(layout, CACluster))
 	apiserverBefore := certFingerprint(t, leafPath(layout, LeafAPIServer))
-	adminBefore := readFile(t, filepath.Join(layout.KubeconfigDir, "admin.conf"))
+	adminBefore := readFile(t, filepath.Join(layout.KubernetesDir, "admin.conf"))
 
 	if err := signer.RegenerateCA(CAEtcd); err != nil {
 		t.Fatalf("RegenerateCA(CAEtcd): %v", err)
@@ -200,7 +200,7 @@ func TestRegenerateCAEtcdLeavesClusterAlone(t *testing.T) {
 	if apiserverBefore != certFingerprint(t, leafPath(layout, LeafAPIServer)) {
 		t.Error("apiserver.crt changed by etcd CA regeneration")
 	}
-	if !bytes.Equal(adminBefore, readFile(t, filepath.Join(layout.KubeconfigDir, "admin.conf"))) {
+	if !bytes.Equal(adminBefore, readFile(t, filepath.Join(layout.KubernetesDir, "admin.conf"))) {
 		t.Error("admin.conf changed by etcd CA regeneration")
 	}
 }

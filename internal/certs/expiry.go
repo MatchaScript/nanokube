@@ -15,6 +15,8 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 func pathExists(p string) (bool, error) {
@@ -90,8 +92,8 @@ type CAExpiry struct {
 // *x509.Certificate is also retrieved off disk so callers can feed it
 // to needsRotation, which decides short-vs-long-lived from cert
 // lifetime rather than a global constant.
-func CheckLeaves(cfg *kubeadmapi.InitConfiguration, layout Layout) (map[LeafKind]LeafExpiry, error) {
-	signer := NewSigner(cfg, layout)
+func CheckLeaves(cfg *kubeadmapi.InitConfiguration, l layout.Layout) (map[LeafKind]LeafExpiry, error) {
+	signer := NewSigner(cfg, l)
 	mgr, err := signer.renewalManager()
 	if err != nil {
 		return nil, err
@@ -99,7 +101,7 @@ func CheckLeaves(cfg *kubeadmapi.InitConfiguration, layout Layout) (map[LeafKind
 
 	out := make(map[LeafKind]LeafExpiry, len(AllLeaves()))
 	for _, leaf := range AllLeaves() {
-		path := leafPath(layout, leaf)
+		path := leafPath(l, leaf)
 		exists, err := pathExists(path)
 		if err != nil {
 			return nil, err
@@ -112,7 +114,7 @@ func CheckLeaves(cfg *kubeadmapi.InitConfiguration, layout Layout) (map[LeafKind
 		if err != nil {
 			return nil, fmt.Errorf("expiry info for %s: %w", leaf, err)
 		}
-		cert, err := loadLeafCert(layout, leaf)
+		cert, err := loadLeafCert(l, leaf)
 		if err != nil {
 			return nil, err
 		}
@@ -129,10 +131,10 @@ func CheckLeaves(cfg *kubeadmapi.InitConfiguration, layout Layout) (map[LeafKind
 // CheckCAs returns one CAExpiry per CAKind, reading ca.crt off disk
 // directly. The kubeadm renewal manager does not register CAs, so we
 // parse them ourselves.
-func CheckCAs(layout Layout) (map[CAKind]CAExpiry, error) {
+func CheckCAs(l layout.Layout) (map[CAKind]CAExpiry, error) {
 	out := make(map[CAKind]CAExpiry, len(AllCAs()))
 	for _, ca := range AllCAs() {
-		path := caCertPath(layout, ca)
+		path := caCertPath(l, ca)
 		exists, err := pathExists(path)
 		if err != nil {
 			return nil, err
@@ -156,36 +158,36 @@ func CheckCAs(layout Layout) (map[CAKind]CAExpiry, error) {
 }
 
 // caCertPath maps a CAKind to the on-disk ca.crt for that signer.
-func caCertPath(layout Layout, ca CAKind) string {
-	return filepath.Join(layout.PKIDir, string(ca)+".crt")
+func caCertPath(l layout.Layout, ca CAKind) string {
+	return filepath.Join(l.PKIDir, string(ca)+".crt")
 }
 
 // caKeyPath maps a CAKind to the on-disk ca.key for that signer.
-func caKeyPath(layout Layout, ca CAKind) string {
-	return filepath.Join(layout.PKIDir, string(ca)+".key")
+func caKeyPath(l layout.Layout, ca CAKind) string {
+	return filepath.Join(l.PKIDir, string(ca)+".key")
 }
 
 // leafPath maps a LeafKind back to the on-disk file the renewal manager
 // reads/writes. PKI certs land under PKIDir (with the etcd/ subfolder
-// for etcd-* kinds); kubeconfigs are flat under KubeconfigDir.
-func leafPath(layout Layout, leaf LeafKind) string {
+// for etcd-* kinds); kubeconfigs are flat under KubernetesDir.
+func leafPath(l layout.Layout, leaf LeafKind) string {
 	switch leaf {
 	case LeafAPIServer:
-		return filepath.Join(layout.PKIDir, "apiserver.crt")
+		return filepath.Join(l.PKIDir, "apiserver.crt")
 	case LeafAPIServerKubeletClient:
-		return filepath.Join(layout.PKIDir, "apiserver-kubelet-client.crt")
+		return filepath.Join(l.PKIDir, "apiserver-kubelet-client.crt")
 	case LeafAPIServerEtcdClient:
-		return filepath.Join(layout.PKIDir, "apiserver-etcd-client.crt")
+		return filepath.Join(l.PKIDir, "apiserver-etcd-client.crt")
 	case LeafFrontProxyClient:
-		return filepath.Join(layout.PKIDir, "front-proxy-client.crt")
+		return filepath.Join(l.PKIDir, "front-proxy-client.crt")
 	case LeafEtcdServer:
-		return filepath.Join(layout.PKIDir, "etcd", "server.crt")
+		return filepath.Join(l.PKIDir, "etcd", "server.crt")
 	case LeafEtcdPeer:
-		return filepath.Join(layout.PKIDir, "etcd", "peer.crt")
+		return filepath.Join(l.PKIDir, "etcd", "peer.crt")
 	case LeafEtcdHealthcheckClient:
-		return filepath.Join(layout.PKIDir, "etcd", "healthcheck-client.crt")
+		return filepath.Join(l.PKIDir, "etcd", "healthcheck-client.crt")
 	case LeafAdminConf, LeafSuperAdminConf, LeafControllerManagerConf, LeafSchedulerConf:
-		return filepath.Join(layout.KubeconfigDir, string(leaf))
+		return filepath.Join(l.KubernetesDir, string(leaf))
 	}
 	panic("unhandled LeafKind: " + string(leaf))
 }
@@ -193,22 +195,22 @@ func leafPath(layout Layout, leaf LeafKind) string {
 // leafKeyPath returns the on-disk .key partner of a PKI leaf. Kubeconfig
 // leaves embed their private key inside the YAML and have no separate
 // file — those return "".
-func leafKeyPath(layout Layout, leaf LeafKind) string {
+func leafKeyPath(l layout.Layout, leaf LeafKind) string {
 	switch leaf {
 	case LeafAPIServer:
-		return filepath.Join(layout.PKIDir, "apiserver.key")
+		return filepath.Join(l.PKIDir, "apiserver.key")
 	case LeafAPIServerKubeletClient:
-		return filepath.Join(layout.PKIDir, "apiserver-kubelet-client.key")
+		return filepath.Join(l.PKIDir, "apiserver-kubelet-client.key")
 	case LeafAPIServerEtcdClient:
-		return filepath.Join(layout.PKIDir, "apiserver-etcd-client.key")
+		return filepath.Join(l.PKIDir, "apiserver-etcd-client.key")
 	case LeafFrontProxyClient:
-		return filepath.Join(layout.PKIDir, "front-proxy-client.key")
+		return filepath.Join(l.PKIDir, "front-proxy-client.key")
 	case LeafEtcdServer:
-		return filepath.Join(layout.PKIDir, "etcd", "server.key")
+		return filepath.Join(l.PKIDir, "etcd", "server.key")
 	case LeafEtcdPeer:
-		return filepath.Join(layout.PKIDir, "etcd", "peer.key")
+		return filepath.Join(l.PKIDir, "etcd", "peer.key")
 	case LeafEtcdHealthcheckClient:
-		return filepath.Join(layout.PKIDir, "etcd", "healthcheck-client.key")
+		return filepath.Join(l.PKIDir, "etcd", "healthcheck-client.key")
 	}
 	return ""
 }
@@ -217,8 +219,8 @@ func leafKeyPath(layout Layout, leaf LeafKind) string {
 // PKI .crt files are PEM-encoded certificates directly; kubeconfig
 // leaves embed the client cert PEM under users[].user.client-certificate-data,
 // and we extract that via clientcmd.
-func loadLeafCert(layout Layout, leaf LeafKind) (*x509.Certificate, error) {
-	path := leafPath(layout, leaf)
+func loadLeafCert(l layout.Layout, leaf LeafKind) (*x509.Certificate, error) {
+	path := leafPath(l, leaf)
 	switch leaf {
 	case LeafAdminConf, LeafSuperAdminConf, LeafControllerManagerConf, LeafSchedulerConf:
 		return parseKubeconfigClientCert(path)

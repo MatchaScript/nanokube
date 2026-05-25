@@ -52,7 +52,7 @@ import (
 func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[init] "+format+"\n", a...) }
 
-	layout := kubeadm.DefaultLayout()
+	kl := kubeadm.DefaultLayout()
 	nodeName := cfg.NodeRegistration.Name
 
 	isOSTree, err := ostree.IsOSTree()
@@ -63,12 +63,12 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 		return fmt.Errorf("preflight: %w", err)
 	}
 
-	if err := certs.Init(cfg, certsLayout(layout)); err != nil {
+	if err := certs.Init(cfg, layout.Default()); err != nil {
 		return fmt.Errorf("certs init: %w", err)
 	}
-	logf("provisioned PKI under %s", layout.PKIDir)
+	logf("provisioned PKI under %s", kl.PKIDir)
 
-	if err := kubeadm.Ensure(cfg, layout); err != nil {
+	if err := kubeadm.Ensure(cfg, kl); err != nil {
 		return fmt.Errorf("ensure: %w", err)
 	}
 	logf("rendered static pod manifests and kubelet config")
@@ -77,7 +77,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 	// authenticate as system:masters; removeSuperAdminKubeconfig deletes
 	// it again before this function returns. Ensure deliberately does not
 	// produce super-admin.conf so reconcile boots cannot regenerate it.
-	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout); err != nil {
+	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, kl); err != nil {
 		return err
 	}
 
@@ -89,7 +89,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 		return err
 	}
 
-	client, err := initAdminRBAC(layout)
+	client, err := initAdminRBAC(layout.Default())
 	if err != nil {
 		return err
 	}
@@ -195,13 +195,4 @@ func waitControlPlane(ctx context.Context, client kubernetes.Interface, nodeName
 	}
 	logf("control plane ready")
 	return nil
-}
-
-// certsLayout maps the kubeadm.Layout used elsewhere in init onto the
-// certs package's Layout. PKIDir/KubeconfigDir match by construction.
-func certsLayout(l kubeadm.Layout) certs.Layout {
-	return certs.Layout{
-		PKIDir:        l.PKIDir,
-		KubeconfigDir: l.KubeconfigDir,
-	}
 }

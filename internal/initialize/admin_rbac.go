@@ -7,7 +7,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
 
-	"github.com/MatchaScript/nanokube/internal/kubeadm"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
@@ -24,8 +24,8 @@ import (
 // import it — circular-import-by-design. The cluster-admins CRB is a
 // one-time seeding action; reconciling it every boot is what motivated
 // this whole refactor.
-func initAdminRBAC(layout kubeadm.Layout) (kubernetes.Interface, error) {
-	client, err := kubeconfig.EnsureAdminClusterRoleBinding(layout.KubeconfigDir, nil)
+func initAdminRBAC(l layout.Layout) (kubernetes.Interface, error) {
+	client, err := kubeconfig.EnsureAdminClusterRoleBinding(l.KubernetesDir, nil)
 	if err != nil {
 		return nil, fmt.Errorf("seed admin cluster role binding: %w", err)
 	}

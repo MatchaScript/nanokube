@@ -16,6 +16,7 @@ import (
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	"github.com/MatchaScript/nanokube/internal/certs"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/layouttest"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
@@ -156,13 +157,9 @@ func newTestConfigWithShortLeaves(t *testing.T) *kubeadmapi.InitConfiguration {
 	return c
 }
 
-func newTestCertsLayout(t *testing.T) certs.Layout {
+func newTestCertsLayout(t *testing.T) layout.Layout {
 	t.Helper()
-	root := t.TempDir()
-	return certs.Layout{
-		PKIDir:        filepath.Join(root, "pki"),
-		KubeconfigDir: filepath.Join(root, "kubernetes"),
-	}
+	return layouttest.New(t)
 }
 
 func readSerial(t *testing.T, path string) string {

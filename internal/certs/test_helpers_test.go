@@ -1,13 +1,15 @@
 package certs
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
+
+	"github.com/MatchaScript/nanokube/internal/layout"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
 
 // testConfig returns a fully-defaulted *InitConfiguration with the
@@ -31,11 +33,7 @@ func testConfig(t *testing.T) *kubeadmapi.InitConfiguration {
 	return cfg
 }
 
-func testLayout(t *testing.T) Layout {
+func testLayout(t *testing.T) layout.Layout {
 	t.Helper()
-	root := t.TempDir()
-	return Layout{
-		PKIDir:        filepath.Join(root, "pki"),
-		KubeconfigDir: filepath.Join(root, "kubernetes"),
-	}
+	return layouttest.New(t)
 }
