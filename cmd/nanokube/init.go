@@ -47,7 +47,7 @@ func newInitCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return initialize.Run(cmd.Context(), cfg, version.KubernetesVersion, cmd.OutOrStdout())
+			return initialize.Run(cmd.Context(), cfg, g.layout, version.KubernetesVersion, cmd.OutOrStdout())
 		},
 	}
 }

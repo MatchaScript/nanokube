@@ -8,7 +8,6 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
 
 	"github.com/MatchaScript/nanokube/internal/layout"
-	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
 // initAdminRBAC seeds the kubeadm:cluster-admins ClusterRoleBinding so
@@ -32,13 +31,13 @@ func initAdminRBAC(l layout.Layout) (kubernetes.Interface, error) {
 	return client, nil
 }
 
-// removeSuperAdminKubeconfig deletes /etc/kubernetes/super-admin.conf.
+// removeSuperAdminKubeconfig deletes l.SuperAdminKubeconfig.
 // Called immediately after initAdminRBAC so the system:masters-bound
 // break-glass cred does not linger on a long-lived node. Idempotent: a
 // missing file is not an error (a partially-completed prior init may
 // have already removed it).
-func removeSuperAdminKubeconfig() error {
-	if err := os.Remove(paths.SuperAdminKubeconfig); err != nil && !os.IsNotExist(err) {
+func removeSuperAdminKubeconfig(l layout.Layout) error {
+	if err := os.Remove(l.SuperAdminKubeconfig); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove super-admin.conf: %w", err)
 	}
 	return nil

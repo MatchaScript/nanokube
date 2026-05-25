@@ -35,7 +35,6 @@ import (
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
 	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/ostree"
-	"github.com/MatchaScript/nanokube/internal/paths"
 	"github.com/MatchaScript/nanokube/internal/preflight"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
@@ -49,21 +48,26 @@ import (
 // already been filled in by kubeadm's SetNodeRegistrationDynamicDefaults
 // from the system hostname, so a separate nodeName argument is no
 // longer threaded through the call graph.
-func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion string, out io.Writer) error {
+func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[init] "+format+"\n", a...) }
-
-	l := layout.Default()
 	nodeName := cfg.NodeRegistration.Name
 
 	isOSTree, err := ostree.IsOSTree()
 	if err != nil {
 		return fmt.Errorf("detect ostree: %w", err)
 	}
-	if err := preflight.Preinstall(isOSTree); err != nil {
+
+	checks := []preflight.Preflighter{
+		preflight.FSWritable{Dirs: []string{l.NanoKubeVarDir, l.KubernetesDir}},
+	}
+	if isOSTree {
+		checks = append(checks, backup.SpacePreflighter{Layout: l})
+	}
+	if err := preflight.Run(ctx, checks...); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 
-	if err := certs.Init(cfg, layout.Default()); err != nil {
+	if err := certs.Init(cfg, l); err != nil {
 		return fmt.Errorf("certs init: %w", err)
 	}
 	logf("provisioned PKI under %s", l.PKIDir)
@@ -85,17 +89,17 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 		return err
 	}
 
-	if err := waitReadyz(ctx, logf); err != nil {
+	if err := waitReadyz(ctx, l, logf); err != nil {
 		return err
 	}
 
-	client, err := initAdminRBAC(layout.Default())
+	client, err := initAdminRBAC(l)
 	if err != nil {
 		return err
 	}
 	logf("seeded kubeadm:cluster-admins ClusterRoleBinding")
 
-	if err := removeSuperAdminKubeconfig(); err != nil {
+	if err := removeSuperAdminKubeconfig(l); err != nil {
 		return err
 	}
 	logf("removed super-admin.conf (regenerate via `nanokube kubeconfig super-admin` if needed)")
@@ -113,7 +117,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 		return fmt.Errorf("addons: %w", err)
 	}
 
-	if err := writeFirstBootState(selfVersion, isOSTree); err != nil {
+	if err := writeFirstBootState(l, selfVersion, isOSTree); err != nil {
 		return err
 	}
 
@@ -125,7 +129,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 // writeFirstBootState records the just-completed init so the next
 // `lifecycle.Boot` invocation sees it as the previous-boot baseline (for
 // upgrade detection and backup naming).
-func writeFirstBootState(selfVersion string, isOSTree bool) error {
+func writeFirstBootState(l layout.Layout, selfVersion string, isOSTree bool) error {
 	bootID, err := backup.BootID()
 	if err != nil {
 		return err
@@ -137,14 +141,14 @@ func writeFirstBootState(selfVersion string, isOSTree bool) error {
 			return fmt.Errorf("booted deployment id: %w", err)
 		}
 	}
-	if err := state.WriteLastBoot(layout.Default(), state.LastBoot{
+	if err := state.WriteLastBoot(l, state.LastBoot{
 		Version:      selfVersion,
 		DeploymentID: deploymentID,
 		BootID:       bootID,
 	}); err != nil {
 		return err
 	}
-	_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("initialised at %s", selfVersion))
+	_ = state.WriteLastEvent(l, fmt.Sprintf("initialised at %s", selfVersion))
 	return nil
 }
 
@@ -167,9 +171,9 @@ func startKubelet(ctx context.Context, logf func(string, ...any)) error {
 // asking systemd to start kubelet for the first time.
 const readyzTimeout = 3 * time.Minute
 
-func waitReadyz(ctx context.Context, logf func(string, ...any)) error {
+func waitReadyz(ctx context.Context, l layout.Layout, logf func(string, ...any)) error {
 	logf("waiting for apiserver /readyz (timeout=%s)", readyzTimeout)
-	client, err := kubeclient.LoadAdmin(paths.AdminKubeconfig)
+	client, err := kubeclient.LoadAdmin(l.AdminKubeconfig)
 	if err != nil {
 		return err
 	}
