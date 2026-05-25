@@ -221,8 +221,14 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
 	}
 
+	// CR8: addon failure is fatal, matching `nanokube init` and upstream
+	// kubeadm. The previous log-and-continue was asymmetric and let a
+	// boot succeed when the cluster was missing CoreDNS / kube-proxy.
+	// kubeclient.LoadAdmin now sets Timeout=10s (CR14) so a stalled
+	// apiserver TLS handshake cannot hold this fatal path open for the
+	// full controlPlaneTimeout window.
 	if err := kubeadm.EnsureAddons(cfg, client, out); err != nil {
-		logf("addon reconcile failed (continuing): %v", err)
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("addons: %w", err))
 	}
 
 	if useBackups {
