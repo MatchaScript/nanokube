@@ -5,21 +5,22 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
-	"github.com/MatchaScript/nanokube/internal/testutil"
+	"github.com/MatchaScript/nanokube/internal/layout"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
 
-// seedStateAsExisting repoints the paths package at t.TempDir() and
-// drops a kube-apiserver static pod manifest, the single signal
-// state.Exists() now uses to report a prior init.
-func seedStateAsExisting(t *testing.T) {
+// seedStateAsExisting builds a layouttest layout, writes a kube-apiserver
+// static pod manifest (the signal state.Exists() checks for a prior init),
+// and returns the layout so callers can pass it to runCmdWithLayout.
+func seedStateAsExisting(t *testing.T) layout.Layout {
 	t.Helper()
-	testutil.UseTempPaths(t)
-	manifest := filepath.Join(paths.ManifestsDir, "kube-apiserver.yaml")
+	l := layouttest.New(t)
+	manifest := filepath.Join(l.ManifestsDir, "kube-apiserver.yaml")
 	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(manifest, []byte("apiVersion: v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return l
 }

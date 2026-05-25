@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // LastBoot is the metadata persisted after a healthy boot. DeploymentID
@@ -37,8 +37,8 @@ type LastBoot struct {
 
 // ReadLastBoot returns the persisted metadata. The bool is false when no
 // last-boot record exists (fresh install or post-reset).
-func ReadLastBoot() (LastBoot, bool, error) {
-	b, err := os.ReadFile(paths.LastBootFile)
+func ReadLastBoot(l layout.Layout) (LastBoot, bool, error) {
+	b, err := os.ReadFile(l.LastBootFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return LastBoot{}, false, nil
 	}
@@ -53,22 +53,22 @@ func ReadLastBoot() (LastBoot, bool, error) {
 }
 
 // WriteLastBoot records lb atomically.
-func WriteLastBoot(lb LastBoot) error {
+func WriteLastBoot(l layout.Layout, lb LastBoot) error {
 	data, err := json.Marshal(lb)
 	if err != nil {
 		return err
 	}
-	return writeAtomic(paths.LastBootFile, data)
+	return writeAtomic(l.LastBootFile, data)
 }
 
 // WriteLastEvent records msg as the most recent lifecycle event.
-func WriteLastEvent(msg string) error {
-	return writeAtomic(paths.LastEventFile, []byte(msg+"\n"))
+func WriteLastEvent(l layout.Layout, msg string) error {
+	return writeAtomic(l.LastEventFile, []byte(msg+"\n"))
 }
 
 // ReadLastEvent returns the recorded event, or "" if none exists.
-func ReadLastEvent() (string, error) {
-	b, err := os.ReadFile(paths.LastEventFile)
+func ReadLastEvent(l layout.Layout) (string, error) {
+	b, err := os.ReadFile(l.LastEventFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -81,9 +81,9 @@ func ReadLastEvent() (string, error) {
 // Exists reports whether the node already carries nanokube-managed state
 // that init would conflict with. Two independent signals:
 //
-//   - /etc/kubernetes/manifests/kube-apiserver.yaml — kubeadm.Ensure
+//   - <KubernetesDir>/manifests/kube-apiserver.yaml — kubeadm.Ensure
 //     wrote the static pod manifest, so init has run.
-//   - /var/lib/nanokube — lifecycle has persisted state (last-boot.json,
+//   - <NanoKubeVarDir> — lifecycle has persisted state (last-boot.json,
 //     backups, …) from a prior cluster.
 //
 // Either alone is reason to refuse a fresh init; the second guards
@@ -91,10 +91,10 @@ func ReadLastEvent() (string, error) {
 // lifecycle data still references the old cluster, which would corrupt
 // the next boot's upgrade-detection / backup-naming logic.
 // `nanokube reset` wipes both, so the operator-recovery path is uniform.
-func Exists() (bool, error) {
+func Exists(l layout.Layout) (bool, error) {
 	for _, p := range []string{
-		paths.KubeAPIServerManifest,
-		paths.NanoKubeVarDir,
+		l.KubeAPIServerManifest,
+		l.NanoKubeVarDir,
 	} {
 		ok, err := fileExists(p)
 		if err != nil {

@@ -70,6 +70,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/ostree"
 	"github.com/MatchaScript/nanokube/internal/paths"
 	"github.com/MatchaScript/nanokube/internal/preflight"
@@ -131,7 +132,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 		}
 	}
 
-	prev, hadPrev, err := state.ReadLastBoot()
+	prev, hadPrev, err := state.ReadLastBoot(layout.Default())
 	if err != nil {
 		return err
 	}
@@ -155,25 +156,25 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 		logf("first healthy boot pending (version=%s)", selfVersion)
 	case upgrading:
 		logf("upgrade path: %s -> %s", prev.Version, selfVersion)
-		_ = state.WriteLastEvent(fmt.Sprintf("upgrading %s -> %s", prev.Version, selfVersion))
+		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("upgrading %s -> %s", prev.Version, selfVersion))
 	default:
 		logf("reconcile path (version=%s)", selfVersion)
 	}
 
 	if err := kubeadm.Ensure(cfg, kubeadm.DefaultLayout()); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
 	}
 
 	if err := rotateCertsIfStale(cfg, certsLayout(kubeadm.DefaultLayout()), out); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, err)
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
 	}
 
 	if err := startKubelet(ctx, logf); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, err)
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
 	}
 
 	if err := waitReadyz(ctx, logf); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, err)
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
 	}
 
 	// admin.conf only: the cluster-admins CRB was seeded once during
@@ -184,7 +185,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// a silent fallback.
 	client, err := kubeclient.LoadAdmin(paths.AdminKubeconfig)
 	if err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, err)
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
 	}
 
 	// Beyond /readyz on the apiserver, confirm the node object reports
@@ -192,11 +193,11 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// Ready. Matches kinder's waitNewControlPlaneNodeReady and catches
 	// CM/scheduler crash-loops that /readyz alone would miss.
 	if err := waitControlPlane(ctx, client, nodeName, logf); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, err)
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, err)
 	}
 
 	if err := markcontrolplane.MarkControlPlane(client, nodeName, cfg.NodeRegistration.Taints); err != nil {
-		return bootFailed(upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
+		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
 	}
 
 	if err := kubeadm.EnsureAddons(cfg, client, out); err != nil {
@@ -219,7 +220,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// boot of stale `prev` next time around (snapshot may use an older
 	// name; backup.Create is idempotent on duplicates) — strictly less
 	// damaging than rolling back a healthy cluster.
-	if err := state.WriteLastBoot(state.LastBoot{
+	if err := state.WriteLastBoot(layout.Default(), state.LastBoot{
 		Version:      selfVersion,
 		DeploymentID: currentDeployment,
 		BootID:       currentBoot,
@@ -228,11 +229,11 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	}
 	switch {
 	case upgrading:
-		_ = state.WriteLastEvent(fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
+		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
 	case !hadPrev:
-		_ = state.WriteLastEvent(fmt.Sprintf("initialised at %s", selfVersion))
+		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("initialised at %s", selfVersion))
 	default:
-		_ = state.WriteLastEvent(fmt.Sprintf("healthy at %s", selfVersion))
+		_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("healthy at %s", selfVersion))
 	}
 	// Cluster is verified healthy. Notify systemd READY=1 so a blocking
 	// `systemctl start nanokube.service` returns only once the system is
@@ -269,7 +270,7 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 
 	if currentDeployment == "" {
 		logf("restore marker present but no booted deployment id; ignoring")
-		_ = state.WriteLastEvent("restore requested but no deployment id")
+		_ = state.WriteLastEvent(layout.Default(), "restore requested but no deployment id")
 		return nil
 	}
 	name, err := backup.LatestForDeployment(currentDeployment)
@@ -278,7 +279,7 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 	}
 	if name == "" {
 		logf("restore marker present but no backup for deployment %s", shortID(currentDeployment))
-		_ = state.WriteLastEvent("restore requested but no backup for current deployment")
+		_ = state.WriteLastEvent(layout.Default(), "restore requested but no backup for current deployment")
 		return nil
 	}
 
@@ -290,20 +291,20 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 	if err != nil {
 		return err
 	}
-	if err := state.WriteLastBoot(meta); err != nil {
+	if err := state.WriteLastBoot(layout.Default(), meta); err != nil {
 		return err
 	}
-	_ = state.WriteLastEvent(fmt.Sprintf("restored backup %s", name))
+	_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("restored backup %s", name))
 	return nil
 }
 
-func bootFailed(upgrading bool, prev, self string, cause error) error {
+func bootFailed(l layout.Layout, upgrading bool, prev, self string, cause error) error {
 	reason := cause.Error()
 	switch {
 	case upgrading:
-		_ = state.WriteLastEvent(fmt.Sprintf("boot failed upgrading %s -> %s: %s", prev, self, reason))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("boot failed upgrading %s -> %s: %s", prev, self, reason))
 	default:
-		_ = state.WriteLastEvent(fmt.Sprintf("boot failed at %s: %s", self, reason))
+		_ = state.WriteLastEvent(l, fmt.Sprintf("boot failed at %s: %s", self, reason))
 	}
 	return cause
 }

@@ -16,8 +16,8 @@ import (
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	"github.com/MatchaScript/nanokube/internal/certs"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 	"github.com/MatchaScript/nanokube/internal/state"
-	"github.com/MatchaScript/nanokube/internal/testutil"
 )
 
 func TestShortID(t *testing.T) {
@@ -49,14 +49,14 @@ func TestShortPair_JoinsWithUnderscore(t *testing.T) {
 // distinguishable because operators read last-event from MOTD and the
 // phrasing drives their debugging.
 func TestBootFailed_WritesUpgradeEventAndReturnsCause(t *testing.T) {
-	testutil.UseTempPaths(t)
+	l := layouttest.New(t)
 
 	cause := errors.New("kubelet refused to start")
-	err := bootFailed(true, "v1.35.0", "v1.36.0", cause)
+	err := bootFailed(l, true, "v1.35.0", "v1.36.0", cause)
 	if !errors.Is(err, cause) {
 		t.Errorf("bootFailed returned %v; must wrap cause", err)
 	}
-	event, err := state.ReadLastEvent()
+	event, err := state.ReadLastEvent(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,12 +68,12 @@ func TestBootFailed_WritesUpgradeEventAndReturnsCause(t *testing.T) {
 }
 
 func TestBootFailed_WritesSteadyStateEvent(t *testing.T) {
-	testutil.UseTempPaths(t)
+	l := layouttest.New(t)
 
 	cause := errors.New("ensure: PKI gone")
-	_ = bootFailed(false, "", "v1.35.0", cause)
+	_ = bootFailed(l, false, "", "v1.35.0", cause)
 
-	event, err := state.ReadLastEvent()
+	event, err := state.ReadLastEvent(l)
 	if err != nil {
 		t.Fatal(err)
 	}

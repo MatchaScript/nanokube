@@ -6,14 +6,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // runCmd executes the cobra root with args and returns stdout/stderr and
 // the error returned from Execute(). The root is reconstructed per call
 // so cobra's persistent flag state does not bleed across tests.
 func runCmd(args ...string) (stdout, stderr string, err error) {
+	return runCmdWithLayout(layout.Default(), args...)
+}
+
+// runCmdWithLayout is like runCmd but injects l into globalOpts so tests
+// can redirect state paths without touching process-global variables.
+func runCmdWithLayout(l layout.Layout, args ...string) (stdout, stderr string, err error) {
 	var out, errBuf bytes.Buffer
-	root := newRootCmd()
+	root := newRootCmdWithOpts(&globalOpts{configPath: l.ConfigFile, layout: l})
 	root.SetOut(&out)
 	root.SetErr(&errBuf)
 	root.SetArgs(args)
@@ -126,9 +134,9 @@ networking:
 		t.Fatal(err)
 	}
 
-	seedStateAsExisting(t)
+	l := seedStateAsExisting(t)
 
-	_, _, err := runCmd("--config", cfg, "init")
+	_, _, err := runCmdWithLayout(l, "--config", cfg, "init")
 	if err == nil {
 		t.Fatal("init on existing state = nil; must refuse")
 	}

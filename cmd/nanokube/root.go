@@ -5,25 +5,33 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/version"
 )
 
 type globalOpts struct {
 	configPath string
+	layout     layout.Layout
 }
 
 func newRootCmd() *cobra.Command {
-	opts := &globalOpts{}
+	return newRootCmdWithOpts(&globalOpts{layout: layout.Default()})
+}
 
+// newRootCmdWithOpts builds the cobra tree from a caller-supplied opts.
+// Tests use this to inject a layouttest layout without touching
+// process-global variables.
+func newRootCmdWithOpts(opts *globalOpts) *cobra.Command {
+	if opts.configPath == "" {
+		opts.configPath = opts.layout.ConfigFile
+	}
 	cmd := &cobra.Command{
 		Use:           "nanokube",
 		Short:         "Minimal single-node Kubernetes for bootc-style edge deployments",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	cmd.PersistentFlags().StringVar(&opts.configPath, "config", paths.ConfigFile, "path to NanoKubeConfig YAML")
-
+	cmd.PersistentFlags().StringVar(&opts.configPath, "config", opts.configPath, "path to NanoKubeConfig YAML")
 	cmd.AddCommand(
 		newInitCmd(opts),
 		newResetCmd(opts),

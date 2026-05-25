@@ -36,7 +36,7 @@ func newInitCmd(g *globalOpts) *cobra.Command {
 			"`nanokube reset --yes` first to re-init.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			existed, err := state.Exists()
+			existed, err := state.Exists(g.layout)
 			if err != nil {
 				return err
 			}

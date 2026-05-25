@@ -33,6 +33,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/ostree"
 	"github.com/MatchaScript/nanokube/internal/paths"
 	"github.com/MatchaScript/nanokube/internal/preflight"
@@ -136,14 +137,14 @@ func writeFirstBootState(selfVersion string, isOSTree bool) error {
 			return fmt.Errorf("booted deployment id: %w", err)
 		}
 	}
-	if err := state.WriteLastBoot(state.LastBoot{
+	if err := state.WriteLastBoot(layout.Default(), state.LastBoot{
 		Version:      selfVersion,
 		DeploymentID: deploymentID,
 		BootID:       bootID,
 	}); err != nil {
 		return err
 	}
-	_ = state.WriteLastEvent(fmt.Sprintf("initialised at %s", selfVersion))
+	_ = state.WriteLastEvent(layout.Default(), fmt.Sprintf("initialised at %s", selfVersion))
 	return nil
 }
 
