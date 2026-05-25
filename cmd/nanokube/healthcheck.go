@@ -9,7 +9,6 @@ import (
 
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
-	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
 // newHealthcheckCmd separates "is the cluster healthy?" from "did the
@@ -27,7 +26,7 @@ import (
 // Exits 0 when every probe passes inside the budget; non-zero otherwise.
 // Greenboot's boot_counter retries this several times before giving up
 // and tripping the rollback path, so a brief startup race is tolerated.
-func newHealthcheckCmd(_ *globalOpts) *cobra.Command {
+func newHealthcheckCmd(g *globalOpts) *cobra.Command {
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "healthcheck",
@@ -43,7 +42,7 @@ func newHealthcheckCmd(_ *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, err := kubeclient.LoadAdmin(paths.AdminKubeconfig)
+			client, err := kubeclient.LoadAdmin(g.layout.AdminKubeconfig)
 			if err != nil {
 				return err
 			}
