@@ -1,6 +1,7 @@
 package preflight
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,4 +142,28 @@ func AllocateWorkspace(useBackups bool) (Workspace, func(), error) {
 		_ = os.RemoveAll(staging)
 	}
 	return Workspace{BackupTmp: staging}, cleanup, nil
+}
+
+// Preflighter is a single readonly-or-near-readonly pre-condition gate.
+// Implementations MUST return promptly on ctx cancellation and MUST NOT
+// produce on-disk side effects that survive Preflight returning (a write
+// probe that unlinks its own temp file is allowed).
+type Preflighter interface {
+	Preflight(ctx context.Context) error
+}
+
+// Run executes checks sequentially, stopping at the first error.
+// Sequential (not parallel) because most checks touch the same
+// filesystem; concurrent writeProbe / statfs calls would inflate false
+// positives without buying any latency that matters for boot.
+func Run(ctx context.Context, checks ...Preflighter) error {
+	for _, c := range checks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.Preflight(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
