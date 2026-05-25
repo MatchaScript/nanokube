@@ -148,12 +148,27 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	// there is nothing to snapshot. On a rollback boot we may have just
 	// restored; in that case the backup by this name already exists and
 	// Create skips.
-	if useBackups && hadPrev && prev.DeploymentID != "" && prev.BootID != "" && prev.BootID != currentBoot {
-		finalDir := filepath.Join(l.BackupsDir, backup.Name(prev))
-		if err := backup.Create(workspace.BackupTmp, finalDir, prev, l); err != nil {
-			return fmt.Errorf("create backup: %w", err)
+	//
+	// CR6: gate the snapshot on prev.DeploymentID == currentDeployment.
+	// After an ostree rebase the new boot runs under a different
+	// deployment id, and labelling the previous boot's data with the
+	// new deployment would let a future rollback restore data the old
+	// binary cannot run. Skipping is the correct behaviour — operators
+	// who want a pre-rebase snapshot must take it before `rpm-ostree
+	// rebase`.
+	if useBackups && hadPrev && prev.BootID != "" && prev.BootID != currentBoot {
+		switch {
+		case prev.DeploymentID == "" || prev.DeploymentID != currentDeployment:
+			logf("skipping snapshot: prev deployment %s != current %s (likely ostree rebase)",
+				shortID(prev.DeploymentID), shortID(currentDeployment))
+			_ = state.WriteLastEvent(l, "snapshot skipped: deployment id mismatch after rebase")
+		default:
+			finalDir := filepath.Join(l.BackupsDir, backup.Name(prev))
+			if err := backup.Create(workspace.BackupTmp, finalDir, prev, l); err != nil {
+				return fmt.Errorf("create backup: %w", err)
+			}
+			logf("snapshot of previous boot saved as %s", shortPair(prev.DeploymentID, prev.BootID))
 		}
-		logf("snapshot of previous boot saved as %s", shortPair(prev.DeploymentID, prev.BootID))
 	}
 
 	upgrading := hadPrev && prev.Version != selfVersion
