@@ -47,10 +47,39 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
+
+// backupEntry pairs a backup directory name with its on-disk modtime,
+// used by sortByModTimeDesc.
+type backupEntry struct {
+	name  string
+	mtime time.Time
+}
+
+// sortByModTimeDesc stats each name under l.BackupsDir and returns
+// entries sorted newest-first. List/Stat races where a concurrent prune
+// removed the entry are tolerated (fs.ErrNotExist is skipped); any
+// other stat error propagates so we never silently dereference a nil
+// FileInfo (CR3).
+func sortByModTimeDesc(l layout.Layout, names []string) ([]backupEntry, error) {
+	out := make([]backupEntry, 0, len(names))
+	for _, n := range names {
+		fi, err := os.Stat(filepath.Join(l.BackupsDir, n))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("stat backup %s: %w", n, err)
+		}
+		out = append(out, backupEntry{n, fi.ModTime()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].mtime.After(out[j].mtime) })
+	return out, nil
+}
 
 // kubeletStateFiles enumerates the /var/lib/kubelet files worth
 // preserving. Other entries (pods, plugins, pki) are regenerable and
@@ -220,28 +249,20 @@ func LatestForDeployment(l layout.Layout, deploymentID string) (string, error) {
 		return "", err
 	}
 	prefix := deploymentID + "_"
-	type stamped struct {
-		name string
-		info os.FileInfo
-	}
-	var candidates []stamped
+	matches := make([]string, 0, len(names))
 	for _, n := range names {
-		if !strings.HasPrefix(n, prefix) {
-			continue
+		if strings.HasPrefix(n, prefix) {
+			matches = append(matches, n)
 		}
-		info, err := os.Stat(filepath.Join(l.BackupsDir, n))
-		if err != nil {
-			return "", err
-		}
-		candidates = append(candidates, stamped{n, info})
 	}
-	if len(candidates) == 0 {
+	sorted, err := sortByModTimeDesc(l, matches)
+	if err != nil {
+		return "", err
+	}
+	if len(sorted) == 0 {
 		return "", nil
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
-	})
-	return candidates[0].name, nil
+	return sorted[0].name, nil
 }
 
 // LatestSize returns the on-disk size in bytes of the most recent
@@ -254,25 +275,14 @@ func LatestSize(l layout.Layout) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(names) == 0 {
+	sorted, err := sortByModTimeDesc(l, names)
+	if err != nil {
+		return 0, err
+	}
+	if len(sorted) == 0 {
 		return 0, nil
 	}
-	type stamped struct {
-		name string
-		info os.FileInfo
-	}
-	candidates := make([]stamped, 0, len(names))
-	for _, n := range names {
-		info, err := os.Stat(filepath.Join(l.BackupsDir, n))
-		if err != nil {
-			return 0, err
-		}
-		candidates = append(candidates, stamped{n, info})
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
-	})
-	return dirSize(filepath.Join(l.BackupsDir, candidates[0].name))
+	return dirSize(filepath.Join(l.BackupsDir, sorted[0].name))
 }
 
 func dirSize(root string) (uint64, error) {
@@ -321,14 +331,14 @@ func Prune(l layout.Layout, knownDeployments []string) error {
 		if len(group) <= 1 {
 			continue
 		}
-		sort.Slice(group, func(i, j int) bool {
-			ii, _ := os.Stat(filepath.Join(l.BackupsDir, group[i]))
-			jj, _ := os.Stat(filepath.Join(l.BackupsDir, group[j]))
-			return ii.ModTime().After(jj.ModTime())
-		})
-		for _, n := range group[1:] {
-			if err := os.RemoveAll(filepath.Join(l.BackupsDir, n)); err != nil {
-				return fmt.Errorf("prune %s: %w", n, err)
+		sorted, err := sortByModTimeDesc(l, group)
+		if err != nil {
+			return fmt.Errorf("sort backups for prune: %w", err)
+		}
+		// Keep the newest, prune the rest.
+		for _, entry := range sorted[1:] {
+			if err := os.RemoveAll(filepath.Join(l.BackupsDir, entry.name)); err != nil {
+				return fmt.Errorf("prune %s: %w", entry.name, err)
 			}
 		}
 	}
