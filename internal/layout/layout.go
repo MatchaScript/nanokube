@@ -45,8 +45,8 @@ type Layout struct {
 	EtcdDataDir string // /var/lib/etcd
 }
 
-// Default returns the production layout. Values match the legacy
-// internal/paths package 1:1; the layout_test.go parity test enforces this.
+// Default returns the production layout — the canonical kubeadm +
+// nanokube on-disk locations.
 func Default() Layout {
 	const (
 		configDir = "/etc/nanokube"

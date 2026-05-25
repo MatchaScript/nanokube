@@ -5,7 +5,7 @@
 //	               kube-apiserver's static-pod startup window.
 //	cluster.go     cluster resources: Node Ready + the three control-
 //	               plane static pods Ready, which `nanokube healthcheck`
-//	               + lifecycle.Boot + initialize.Run all gate on.
+//	               + boot.Run + initialize.Run all gate on.
 //
 // Pre-action gates (writability probes, free-space checks) live in
 // package preflight instead — separating "is the host ready to act"

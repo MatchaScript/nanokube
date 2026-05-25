@@ -10,7 +10,7 @@ import (
 // and leaf is self-signed by nanokube; no operator-supplied material is
 // consumed.
 //
-// Called exclusively from initialize.Run. lifecycle.Boot must NOT
+// Called exclusively from initialize.Run. boot.Run must NOT
 // invoke Init: by then PKIDir is the build artifact and reseeding
 // would silently change identities under a running cluster.
 func Init(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {

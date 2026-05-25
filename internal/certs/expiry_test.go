@@ -43,7 +43,7 @@ func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	// EnsureAll does not produce super-admin.conf — mirroring the
-	// production state during lifecycle.Boot.
+	// production state during boot.Run.
 	report, err := CheckLeaves(cfg, layout)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestCheckLeavesReportsNotFoundForAbsentSuperAdmin(t *testing.T) {
 }
 
 // With a 1-day leaf validity, every leaf trips NeedsRotation — exactly
-// the situation lifecycle.Boot must detect.
+// the situation boot.Run must detect.
 func TestCheckLeavesFlagsExpiringLeavesAsBelowThreshold(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.CertificateValidityPeriod = &metav1.Duration{Duration: 24 * time.Hour}
