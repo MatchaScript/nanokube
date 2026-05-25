@@ -8,7 +8,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/teardown"
 )
 
-func newResetCmd(_ *globalOpts) *cobra.Command {
+func newResetCmd(g *globalOpts) *cobra.Command {
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "reset",
@@ -24,7 +24,7 @@ func newResetCmd(_ *globalOpts) *cobra.Command {
 			if !confirm {
 				return errors.New("refusing to proceed without --yes (this is destructive)")
 			}
-			return teardown.Run(cmd.Context(), cmd.OutOrStdout())
+			return teardown.Run(cmd.Context(), g.layout, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().BoolVar(&confirm, "yes", false, "confirm the destructive operation")

@@ -34,7 +34,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // defaultCRISocket is the on-disk CRI endpoint nanokube installs talk to
@@ -44,39 +44,37 @@ import (
 // property of the image, not the configuration.
 const defaultCRISocket = "unix:///var/run/crio/crio.sock"
 
-// Logger is a tiny printf-shaped sink. nil is treated as a no-op so
-// callers that do not care about progress output can pass nil.
-type Logger func(format string, a ...any)
+// logFn is the internal printf-shaped sink. nil out is folded to
+// io.Discard at the entry point so helpers can always call logf safely.
+type logFn = func(format string, a ...any)
 
 // Run executes the full teardown. unmountKubeletMounts and the final
 // RemoveAll loop are fatal; stopKubelet and removeKubeContainers are
 // best-effort so a partially broken host can still be cleaned up
 // (matches `kubeadm reset --force`).
-func Run(ctx context.Context, out io.Writer) error {
+func Run(ctx context.Context, l layout.Layout, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
 	logf := func(format string, a ...any) {
-		if out == nil {
-			return
-		}
 		fmt.Fprintf(out, "[reset] "+format+"\n", a...)
 	}
 
 	stopKubelet(ctx, logf)
 
-	if err := unmountKubeletMounts(logf); err != nil {
-		return fmt.Errorf("unmount kubelet mounts under %s: %w", paths.KubeletDir, err)
+	if err := unmountKubeletMounts(l, logf); err != nil {
+		return fmt.Errorf("unmount kubelet mounts under %s: %w", l.KubeletDir, err)
 	}
 
 	removeKubeContainers(logf)
 
 	for _, t := range []string{
-		paths.KubernetesDir,
-		paths.EtcdDataDir,
-		paths.KubeletDir,
-		paths.NanoKubeVarDir,
+		l.KubernetesDir,
+		l.EtcdDataDir,
+		l.KubeletDir,
+		l.NanoKubeVarDir,
 	} {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+		// RemoveAll is uninterruptible; ctx cancellation cannot stop a single call.
 		if err := os.RemoveAll(t); err != nil {
 			return fmt.Errorf("remove %s: %w", t, err)
 		}
@@ -89,7 +87,7 @@ func Run(ctx context.Context, out io.Writer) error {
 // stopKubelet stops kubelet.service so static pods are not brought back
 // up mid-cleanup. Non-fatal: on a fresh node kubelet may not be
 // installed or enabled.
-func stopKubelet(ctx context.Context, logf Logger) {
+func stopKubelet(ctx context.Context, logf logFn) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "systemctl", "stop", "kubelet.service")
@@ -105,7 +103,7 @@ func stopKubelet(ctx context.Context, logf Logger) {
 // (StopPodSandbox + RemovePodSandbox, with internal retries).
 // Best-effort: an unreachable CRI socket or list/remove failure is
 // logged and skipped, matching `kubeadm reset`'s handling.
-func removeKubeContainers(logf Logger) {
+func removeKubeContainers(logf logFn) {
 	rt := utilruntime.NewContainerRuntime(defaultCRISocket)
 	if err := rt.Connect(); err != nil {
 		logf("connect CRI runtime (continuing): %v", err)
@@ -129,7 +127,7 @@ func removeKubeContainers(logf Logger) {
 }
 
 // unmountKubeletMounts lazy-detaches every mountpoint kubelet placed
-// under /var/lib/kubelet. Mirrors kubeadm's
+// under l.KubeletDir. Mirrors kubeadm's
 // cmd/kubeadm/app/cmd/phases/reset/unmount_linux.go, which is
 // unexported and therefore impossible to call directly:
 //
@@ -140,12 +138,12 @@ func removeKubeContainers(logf Logger) {
 //   - other failures are aggregated and returned; RemoveAll downstream
 //     would trip EBUSY on a half-mounted tree anyway, so failing here
 //     surfaces a cleaner error.
-func unmountKubeletMounts(logf Logger) error {
+func unmountKubeletMounts(l layout.Layout, logf logFn) error {
 	raw, err := os.ReadFile("/proc/mounts")
 	if err != nil {
 		return fmt.Errorf("read /proc/mounts: %w", err)
 	}
-	prefix := paths.KubeletDir
+	prefix := l.KubeletDir
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
@@ -173,7 +171,7 @@ func unmountKubeletMounts(logf Logger) error {
 		unmounted++
 	}
 	if unmounted > 0 {
-		logf("unmounted %d kubelet mounts under %s", unmounted, paths.KubeletDir)
+		logf("unmounted %d kubelet mounts under %s", unmounted, l.KubeletDir)
 	}
 	return utilerrors.NewAggregate(errs)
 }
