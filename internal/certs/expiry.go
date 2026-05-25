@@ -43,10 +43,17 @@ const (
 )
 
 // NeedsRotation reports whether a certificate should be rotated now.
-// Already-expired and not-yet-valid certs always rotate.
+// Already-expired certs always rotate.
+//
+// We deliberately do NOT treat `now < NotBefore` as needing rotation:
+// kubeadm backdates issuance by 5 minutes (CertificateBackdate in
+// kubeadm constants), so a legitimate not-yet-valid cert is impossible.
+// A `now < NotBefore` window therefore implies a wrong clock — silently
+// rotating would mask the misconfiguration. Letting the next TLS
+// handshake surface the error is the correct failure mode.
 func NeedsRotation(c *x509.Certificate) bool {
 	now := time.Now()
-	if now.Before(c.NotBefore) || now.After(c.NotAfter) {
+	if now.After(c.NotAfter) {
 		return true
 	}
 	timeLeft := time.Until(c.NotAfter)

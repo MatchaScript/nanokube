@@ -60,10 +60,14 @@ func TestNeedsRotation(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "not yet valid",
-			notBefore: now.Add(time.Hour),
+			// CR4: pre-NTP boot where realtime clock is behind cert
+			// issuance. Silently rotating would mask the misconfigured
+			// clock — instead, NeedsRotation returns false and the next
+			// TLS handshake surfaces the wrong-clock error.
+			name:      "not yet valid (clock-skew tolerant)",
+			notBefore: now.Add(2 * time.Hour),
 			notAfter:  now.Add(365 * 24 * time.Hour),
-			want:      true,
+			want:      false,
 		},
 	}
 	for _, c := range cases {
