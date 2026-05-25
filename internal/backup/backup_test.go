@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 	"github.com/MatchaScript/nanokube/internal/state"
-	"github.com/MatchaScript/nanokube/internal/testutil"
 )
 
 // requireCp skips the test when the host `cp` binary does not accept the
@@ -48,13 +48,13 @@ func fileContains(s, sub string) bool {
 // newStaging mirrors what preflight.AllocateWorkspace allocates for
 // backup.Create's pre-rename scratch area. Tests call this before each
 // Create to give it a freshly-empty staging dir on the same filesystem
-// as paths.BackupsDir, exactly as the production caller does.
-func newStaging(t *testing.T) string {
+// as l.BackupsDir, exactly as the production caller does.
+func newStaging(t *testing.T, l layout.Layout) string {
 	t.Helper()
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+	if err := os.MkdirAll(l.BackupsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	staging := filepath.Join(paths.BackupsDir, ".staging")
+	staging := filepath.Join(l.BackupsDir, ".staging")
 	_ = os.RemoveAll(staging)
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		t.Fatal(err)
@@ -63,28 +63,28 @@ func newStaging(t *testing.T) string {
 }
 
 // finalDir is the on-disk path Create renames its staging into for meta.
-func finalDir(meta state.LastBoot) string {
-	return filepath.Join(paths.BackupsDir, Name(meta))
+func finalDir(l layout.Layout, meta state.LastBoot) string {
+	return filepath.Join(l.BackupsDir, Name(meta))
 }
 
 // seedLiveState populates the tempdir-rooted live trees with
 // representative content so Create has something to snapshot.
-func seedLiveState(t *testing.T) {
+func seedLiveState(t *testing.T, l layout.Layout) {
 	t.Helper()
 	must := func(err error) {
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	must(os.MkdirAll(paths.EtcdDataDir, 0o700))
-	must(os.WriteFile(filepath.Join(paths.EtcdDataDir, "member"), []byte("etcd-data"), 0o600))
-	must(os.MkdirAll(paths.KubernetesDir, 0o755))
-	must(os.WriteFile(filepath.Join(paths.KubernetesDir, "admin.conf"), []byte("kc"), 0o644))
-	must(os.MkdirAll(paths.ManifestsDir, 0o755))
-	must(os.WriteFile(filepath.Join(paths.ManifestsDir, "kube-apiserver.yaml"), []byte("manifest"), 0o644))
-	must(os.MkdirAll(paths.KubeletDir, 0o755))
+	must(os.MkdirAll(l.EtcdDataDir, 0o700))
+	must(os.WriteFile(filepath.Join(l.EtcdDataDir, "member"), []byte("etcd-data"), 0o600))
+	must(os.MkdirAll(l.KubernetesDir, 0o755))
+	must(os.WriteFile(filepath.Join(l.KubernetesDir, "admin.conf"), []byte("kc"), 0o644))
+	must(os.MkdirAll(l.ManifestsDir, 0o755))
+	must(os.WriteFile(filepath.Join(l.ManifestsDir, "kube-apiserver.yaml"), []byte("manifest"), 0o644))
+	must(os.MkdirAll(l.KubeletDir, 0o755))
 	for _, f := range []string{"config.yaml", "instance-config.yaml", "kubeadm-flags.env"} {
-		must(os.WriteFile(filepath.Join(paths.KubeletDir, f), []byte("x="+f), 0o644))
+		must(os.WriteFile(filepath.Join(l.KubeletDir, f), []byte("x="+f), 0o644))
 	}
 }
 
@@ -112,7 +112,7 @@ func TestName_IsDeploymentUnderscoreBoot(t *testing.T) {
 }
 
 func TestCreate_RejectsEmptyMeta(t *testing.T) {
-	testutil.UseTempPaths(t)
+	l := layouttest.New(t)
 	cases := []state.LastBoot{
 		{DeploymentID: "", BootID: "b"},
 		{DeploymentID: "d", BootID: ""},
@@ -121,7 +121,7 @@ func TestCreate_RejectsEmptyMeta(t *testing.T) {
 	for i, m := range cases {
 		// Use a throwaway staging path; meta validation must reject before
 		// Create touches the filesystem.
-		if err := Create(filepath.Join(paths.BackupsDir, ".staging"), finalDir(m), m); err == nil {
+		if err := Create(filepath.Join(l.BackupsDir, ".staging"), finalDir(l, m), m, l); err == nil {
 			t.Errorf("case %d: Create(%+v) = nil; want error", i, m)
 		}
 	}
@@ -129,15 +129,15 @@ func TestCreate_RejectsEmptyMeta(t *testing.T) {
 
 func TestCreate_CapturesAllThreeTrees(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
-	seedLiveState(t)
+	l := layouttest.New(t)
+	seedLiveState(t, l)
 
 	meta := state.LastBoot{Version: "v1.35.0", DeploymentID: "dep1", BootID: "boot1"}
-	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
+	if err := Create(newStaging(t, l), finalDir(l, meta), meta, l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	backupRoot := finalDir(meta)
+	backupRoot := finalDir(l, meta)
 	for _, rel := range []string{
 		"meta.json",
 		"etcd/member",
@@ -156,28 +156,28 @@ func TestCreate_CapturesAllThreeTrees(t *testing.T) {
 
 func TestCreate_IsIdempotent(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
-	seedLiveState(t)
+	l := layouttest.New(t)
+	seedLiveState(t, l)
 
 	meta := state.LastBoot{Version: "v1.35.0", DeploymentID: "dep1", BootID: "boot1"}
-	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
+	if err := Create(newStaging(t, l), finalDir(l, meta), meta, l); err != nil {
 		t.Fatal(err)
 	}
-	firstStat, err := os.Stat(filepath.Join(finalDir(meta), "meta.json"))
+	firstStat, err := os.Stat(filepath.Join(finalDir(l, meta), "meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Deliberately change live state; idempotent Create must not overwrite
 	// the existing backup with the new contents.
-	if err := os.WriteFile(filepath.Join(paths.KubernetesDir, "admin.conf"), []byte("mutated"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(l.KubernetesDir, "admin.conf"), []byte("mutated"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // ensure mtime would differ on a real rewrite
-	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
+	if err := Create(newStaging(t, l), finalDir(l, meta), meta, l); err != nil {
 		t.Fatal(err)
 	}
 
-	secondStat, err := os.Stat(filepath.Join(finalDir(meta), "meta.json"))
+	secondStat, err := os.Stat(filepath.Join(finalDir(l, meta), "meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestCreate_IsIdempotent(t *testing.T) {
 		t.Errorf("Create overwrote existing backup (mtime changed)")
 	}
 
-	preserved, err := os.ReadFile(filepath.Join(finalDir(meta), "kubernetes/admin.conf"))
+	preserved, err := os.ReadFile(filepath.Join(finalDir(l, meta), "kubernetes/admin.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +200,14 @@ func TestCreate_IsIdempotent(t *testing.T) {
 // final dir.
 func TestCreate_TolerantOfMissingSources(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
+	l := layouttest.New(t)
 	// Deliberately do NOT call seedLiveState so that sources are missing.
 	meta := state.LastBoot{DeploymentID: "d", BootID: "b"}
-	staging := newStaging(t)
-	if err := Create(staging, finalDir(meta), meta); err != nil {
+	staging := newStaging(t, l)
+	if err := Create(staging, finalDir(l, meta), meta, l); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := os.Stat(finalDir(meta)); err != nil {
+	if _, err := os.Stat(finalDir(l, meta)); err != nil {
 		t.Fatalf("final dir missing after success: %v", err)
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
@@ -217,34 +217,34 @@ func TestCreate_TolerantOfMissingSources(t *testing.T) {
 
 func TestRestore_SwapsInBackupContents(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
-	seedLiveState(t)
+	l := layouttest.New(t)
+	seedLiveState(t, l)
 
 	meta := state.LastBoot{Version: "v1", DeploymentID: "d", BootID: "b"}
-	if err := Create(newStaging(t), finalDir(meta), meta); err != nil {
+	if err := Create(newStaging(t, l), finalDir(l, meta), meta, l); err != nil {
 		t.Fatal(err)
 	}
 
 	// Mutate live state — restore must put it back.
-	if err := os.WriteFile(filepath.Join(paths.KubernetesDir, "admin.conf"), []byte("NEW"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(l.KubernetesDir, "admin.conf"), []byte("NEW"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(paths.EtcdDataDir, "member"), []byte("MUTATED"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(l.EtcdDataDir, "member"), []byte("MUTATED"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(paths.KubeletDir, "config.yaml"), []byte("NEW"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(l.KubeletDir, "config.yaml"), []byte("NEW"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Restore(Name(meta)); err != nil {
+	if err := Restore(l, Name(meta)); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
 	for path, want := range map[string]string{
-		filepath.Join(paths.KubernetesDir, "admin.conf"):     "kc",
-		filepath.Join(paths.EtcdDataDir, "member"):           "etcd-data",
-		filepath.Join(paths.KubeletDir, "config.yaml"):       "x=config.yaml",
-		filepath.Join(paths.KubeletDir, "kubeadm-flags.env"): "x=kubeadm-flags.env",
+		filepath.Join(l.KubernetesDir, "admin.conf"):     "kc",
+		filepath.Join(l.EtcdDataDir, "member"):           "etcd-data",
+		filepath.Join(l.KubeletDir, "config.yaml"):       "x=config.yaml",
+		filepath.Join(l.KubeletDir, "kubeadm-flags.env"): "x=kubeadm-flags.env",
 	} {
 		got, err := os.ReadFile(path)
 		if err != nil {
@@ -259,12 +259,12 @@ func TestRestore_SwapsInBackupContents(t *testing.T) {
 
 func TestRestore_MissingEtcdInBackupWipesLiveEtcd(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
+	l := layouttest.New(t)
 
 	// Seed a backup that deliberately lacks the etcd subtree (mimics a
 	// first-boot snapshot where etcd had not yet initialised).
 	meta := state.LastBoot{Version: "v1", DeploymentID: "d", BootID: "b"}
-	backupDir := filepath.Join(paths.BackupsDir, Name(meta))
+	backupDir := filepath.Join(l.BackupsDir, Name(meta))
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -273,39 +273,39 @@ func TestRestore_MissingEtcdInBackupWipesLiveEtcd(t *testing.T) {
 	}
 
 	// Live etcd has content from a newer boot that must be wiped.
-	if err := os.MkdirAll(paths.EtcdDataDir, 0o700); err != nil {
+	if err := os.MkdirAll(l.EtcdDataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(paths.EtcdDataDir, "junk"), []byte("junk"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(l.EtcdDataDir, "junk"), []byte("junk"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Restore(Name(meta)); err != nil {
+	if err := Restore(l, Name(meta)); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	if _, err := os.Stat(paths.EtcdDataDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(l.EtcdDataDir); !os.IsNotExist(err) {
 		t.Errorf("live etcd dir survived restore: err=%v", err)
 	}
 }
 
 func TestRestore_UnknownBackupFails(t *testing.T) {
-	testutil.UseTempPaths(t)
-	if err := Restore("nonexistent_backup"); err == nil {
+	l := layouttest.New(t)
+	if err := Restore(l, "nonexistent_backup"); err == nil {
 		t.Fatal("Restore of unknown backup = nil; want error")
 	}
 }
 
 func TestReadMeta_RoundTrip(t *testing.T) {
 	requireCp(t)
-	testutil.UseTempPaths(t)
-	seedLiveState(t)
+	l := layouttest.New(t)
+	seedLiveState(t, l)
 
 	in := state.LastBoot{Version: "v9.9.9", DeploymentID: "deploy", BootID: "kern-boot"}
-	if err := Create(newStaging(t), finalDir(in), in); err != nil {
+	if err := Create(newStaging(t, l), finalDir(l, in), in, l); err != nil {
 		t.Fatal(err)
 	}
-	out, err := ReadMeta(Name(in))
+	out, err := ReadMeta(l, Name(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,8 +315,8 @@ func TestReadMeta_RoundTrip(t *testing.T) {
 }
 
 func TestList_SkipsTmpAndNonMatchingEntries(t *testing.T) {
-	testutil.UseTempPaths(t)
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+	l := layouttest.New(t)
+	if err := os.MkdirAll(l.BackupsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{
@@ -326,16 +326,16 @@ func TestList_SkipsTmpAndNonMatchingEntries(t *testing.T) {
 		"dep3_boot1.restoring",
 		"noUnderscoreHere",
 	} {
-		if err := os.Mkdir(filepath.Join(paths.BackupsDir, d), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(l.BackupsDir, d), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Also drop a file (not a dir); must be skipped.
-	if err := os.WriteFile(filepath.Join(paths.BackupsDir, "restore"), []byte(""), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(l.BackupsDir, "restore"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	names, err := List()
+	names, err := List(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,8 +352,8 @@ func TestList_SkipsTmpAndNonMatchingEntries(t *testing.T) {
 }
 
 func TestList_MissingDirIsEmpty(t *testing.T) {
-	testutil.UseTempPaths(t)
-	names, err := List()
+	l := layouttest.New(t)
+	names, err := List(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,25 +363,25 @@ func TestList_MissingDirIsEmpty(t *testing.T) {
 }
 
 func TestLatestForDeployment_PicksNewestMtime(t *testing.T) {
-	testutil.UseTempPaths(t)
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+	l := layouttest.New(t)
+	if err := os.MkdirAll(l.BackupsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{"dep1_old", "dep1_new", "dep2_only"} {
-		if err := os.Mkdir(filepath.Join(paths.BackupsDir, d), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(l.BackupsDir, d), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Force mtimes so ordering is unambiguous.
 	now := time.Now()
-	if err := os.Chtimes(filepath.Join(paths.BackupsDir, "dep1_old"), now, now.Add(-1*time.Hour)); err != nil {
+	if err := os.Chtimes(filepath.Join(l.BackupsDir, "dep1_old"), now, now.Add(-1*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(filepath.Join(paths.BackupsDir, "dep1_new"), now, now); err != nil {
+	if err := os.Chtimes(filepath.Join(l.BackupsDir, "dep1_new"), now, now); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := LatestForDeployment("dep1")
+	got, err := LatestForDeployment(l, "dep1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestLatestForDeployment_PicksNewestMtime(t *testing.T) {
 		t.Errorf("LatestForDeployment(dep1) = %q; want dep1_new", got)
 	}
 
-	got, err = LatestForDeployment("dep-missing")
+	got, err = LatestForDeployment(l, "dep-missing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,14 +399,14 @@ func TestLatestForDeployment_PicksNewestMtime(t *testing.T) {
 }
 
 func TestPrune_DropsUnknownDeploymentsAndKeepsNewestPerKnown(t *testing.T) {
-	testutil.UseTempPaths(t)
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+	l := layouttest.New(t)
+	if err := os.MkdirAll(l.BackupsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Now()
 	mk := func(name string, age time.Duration) {
-		p := filepath.Join(paths.BackupsDir, name)
+		p := filepath.Join(l.BackupsDir, name)
 		if err := os.Mkdir(p, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -419,30 +419,30 @@ func TestPrune_DropsUnknownDeploymentsAndKeepsNewestPerKnown(t *testing.T) {
 	mk("gone_boot1", 0)
 	mk("solo_boot1", 0)
 
-	if err := Prune([]string{"keep", "solo"}); err != nil {
+	if err := Prune(l, []string{"keep", "solo"}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
 	for _, want := range []string{"keep_new", "solo_boot1"} {
-		if _, err := os.Stat(filepath.Join(paths.BackupsDir, want)); err != nil {
+		if _, err := os.Stat(filepath.Join(l.BackupsDir, want)); err != nil {
 			t.Errorf("Prune removed %s: %v", want, err)
 		}
 	}
 	for _, gone := range []string{"keep_old", "gone_boot1"} {
-		if _, err := os.Stat(filepath.Join(paths.BackupsDir, gone)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(l.BackupsDir, gone)); !os.IsNotExist(err) {
 			t.Errorf("Prune did not remove %s: %v", gone, err)
 		}
 	}
 }
 
 func TestRestoreMarker_CreatesConsumesClears(t *testing.T) {
-	testutil.UseTempPaths(t)
-	if err := os.MkdirAll(paths.BackupsDir, 0o700); err != nil {
+	l := layouttest.New(t)
+	if err := os.MkdirAll(l.BackupsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
 	// Initially absent.
-	yes, err := RestoreRequested()
+	yes, err := RestoreRequested(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,10 +451,10 @@ func TestRestoreMarker_CreatesConsumesClears(t *testing.T) {
 	}
 
 	// Place marker (mirrors what greenboot red.d does).
-	if err := os.WriteFile(paths.RestoreMarker, nil, 0o600); err != nil {
+	if err := os.WriteFile(l.RestoreMarker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	yes, err = RestoreRequested()
+	yes, err = RestoreRequested(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,10 +463,10 @@ func TestRestoreMarker_CreatesConsumesClears(t *testing.T) {
 	}
 
 	// Clear.
-	if err := ClearRestoreMarker(); err != nil {
+	if err := ClearRestoreMarker(l); err != nil {
 		t.Fatal(err)
 	}
-	yes, err = RestoreRequested()
+	yes, err = RestoreRequested(l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,21 +474,21 @@ func TestRestoreMarker_CreatesConsumesClears(t *testing.T) {
 		t.Error("RestoreRequested true after ClearRestoreMarker")
 	}
 	// ClearRestoreMarker must be idempotent.
-	if err := ClearRestoreMarker(); err != nil {
+	if err := ClearRestoreMarker(l); err != nil {
 		t.Errorf("ClearRestoreMarker on already-absent marker = %v; want nil", err)
 	}
 }
 
 func TestExists_ReportsPresence(t *testing.T) {
-	testutil.UseTempPaths(t)
-	ok, err := Exists("dep_boot")
+	l := layouttest.New(t)
+	ok, err := Exists(l, "dep_boot")
 	if err != nil || ok {
 		t.Errorf("Exists on empty = ok=%v err=%v", ok, err)
 	}
-	if err := os.MkdirAll(filepath.Join(paths.BackupsDir, "dep_boot"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(l.BackupsDir, "dep_boot"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ok, err = Exists("dep_boot")
+	ok, err = Exists(l, "dep_boot")
 	if err != nil || !ok {
 		t.Errorf("Exists on present = ok=%v err=%v", ok, err)
 	}

@@ -48,7 +48,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
 
@@ -78,8 +78,8 @@ func Name(meta state.LastBoot) string {
 }
 
 // Exists reports whether a backup with this name is already on disk.
-func Exists(name string) (bool, error) {
-	_, err := os.Stat(filepath.Join(paths.BackupsDir, name))
+func Exists(l layout.Layout, name string) (bool, error) {
+	_, err := os.Stat(filepath.Join(l.BackupsDir, name))
 	if err == nil {
 		return true, nil
 	}
@@ -95,11 +95,11 @@ func Exists(name string) (bool, error) {
 // (idempotent on the same boot's meta).
 //
 // stagingDir MUST be a sibling of finalDir on the same filesystem and
-// MUST be pre-allocated empty by the caller (preflight.Workspace.BackupTmp
+// MUST be pre-allocated empty by the caller (backup.Workspace.BackupTmp
 // fulfils both contracts). On error Create returns and stops; cleanup of
 // any partial copy in stagingDir is the caller's responsibility, handled
-// uniformly by the deferred cleanup of the preflight-owned workspace.
-func Create(stagingDir, finalDir string, meta state.LastBoot) error {
+// uniformly by the deferred cleanup of the backup-owned workspace.
+func Create(stagingDir, finalDir string, meta state.LastBoot, l layout.Layout) error {
 	if meta.DeploymentID == "" || meta.BootID == "" {
 		return errors.New("backup requires DeploymentID and BootID")
 	}
@@ -109,10 +109,10 @@ func Create(stagingDir, finalDir string, meta state.LastBoot) error {
 		return fmt.Errorf("stat %s: %w", finalDir, err)
 	}
 
-	if err := copyDirIfExists(paths.EtcdDataDir, filepath.Join(stagingDir, "etcd")); err != nil {
+	if err := copyDirIfExists(l.EtcdDataDir, filepath.Join(stagingDir, "etcd")); err != nil {
 		return fmt.Errorf("copy etcd: %w", err)
 	}
-	if err := copyDirIfExists(paths.KubernetesDir, filepath.Join(stagingDir, "kubernetes")); err != nil {
+	if err := copyDirIfExists(l.KubernetesDir, filepath.Join(stagingDir, "kubernetes")); err != nil {
 		return fmt.Errorf("copy kubernetes: %w", err)
 	}
 	kubeletDst := filepath.Join(stagingDir, "kubelet")
@@ -120,7 +120,7 @@ func Create(stagingDir, finalDir string, meta state.LastBoot) error {
 		return fmt.Errorf("mkdir kubelet: %w", err)
 	}
 	for _, f := range kubeletStateFiles {
-		src := filepath.Join(paths.KubeletDir, f)
+		src := filepath.Join(l.KubeletDir, f)
 		dst := filepath.Join(kubeletDst, f)
 		if err := copyFileIfExists(src, dst); err != nil {
 			return fmt.Errorf("copy kubelet/%s: %w", f, err)
@@ -137,8 +137,8 @@ func Create(stagingDir, finalDir string, meta state.LastBoot) error {
 }
 
 // ReadMeta returns the metadata recorded inside a backup directory.
-func ReadMeta(name string) (state.LastBoot, error) {
-	b, err := os.ReadFile(filepath.Join(paths.BackupsDir, name, metaFileName))
+func ReadMeta(l layout.Layout, name string) (state.LastBoot, error) {
+	b, err := os.ReadFile(filepath.Join(l.BackupsDir, name, metaFileName))
 	if err != nil {
 		return state.LastBoot{}, fmt.Errorf("read %s meta: %w", name, err)
 	}
@@ -152,24 +152,24 @@ func ReadMeta(name string) (state.LastBoot, error) {
 // Restore swaps the live state trees with the contents of
 // backups/<name>/. Each target (etcd, kubernetes, selected kubelet
 // files) is staged under an intermediate path and atomically renamed.
-func Restore(name string) error {
-	src := filepath.Join(paths.BackupsDir, name)
+func Restore(l layout.Layout, name string) error {
+	src := filepath.Join(l.BackupsDir, name)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("stat backup %s: %w", name, err)
 	}
 
-	if err := restoreDir(filepath.Join(src, "etcd"), paths.EtcdDataDir); err != nil {
+	if err := restoreDir(filepath.Join(src, "etcd"), l.EtcdDataDir); err != nil {
 		return fmt.Errorf("restore etcd: %w", err)
 	}
-	if err := restoreDir(filepath.Join(src, "kubernetes"), paths.KubernetesDir); err != nil {
+	if err := restoreDir(filepath.Join(src, "kubernetes"), l.KubernetesDir); err != nil {
 		return fmt.Errorf("restore kubernetes: %w", err)
 	}
-	if err := os.MkdirAll(paths.KubeletDir, 0o755); err != nil {
+	if err := os.MkdirAll(l.KubeletDir, 0o755); err != nil {
 		return err
 	}
 	for _, f := range kubeletStateFiles {
 		srcFile := filepath.Join(src, "kubelet", f)
-		dstFile := filepath.Join(paths.KubeletDir, f)
+		dstFile := filepath.Join(l.KubeletDir, f)
 		if _, err := os.Stat(srcFile); errors.Is(err, os.ErrNotExist) {
 			if err := os.Remove(dstFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove live %s: %w", f, err)
@@ -187,8 +187,8 @@ func Restore(name string) error {
 
 // List returns all backup directory names, excluding work-in-progress
 // `.tmp` / `.restoring` artefacts.
-func List() ([]string, error) {
-	entries, err := os.ReadDir(paths.BackupsDir)
+func List(l layout.Layout) ([]string, error) {
+	entries, err := os.ReadDir(l.BackupsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -214,8 +214,8 @@ func List() ([]string, error) {
 
 // LatestForDeployment returns the name of the most recent backup
 // belonging to deploymentID. Returns "" if none exists.
-func LatestForDeployment(deploymentID string) (string, error) {
-	names, err := List()
+func LatestForDeployment(l layout.Layout, deploymentID string) (string, error) {
+	names, err := List(l)
 	if err != nil {
 		return "", err
 	}
@@ -229,7 +229,7 @@ func LatestForDeployment(deploymentID string) (string, error) {
 		if !strings.HasPrefix(n, prefix) {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(paths.BackupsDir, n))
+		info, err := os.Stat(filepath.Join(l.BackupsDir, n))
 		if err != nil {
 			return "", err
 		}
@@ -249,8 +249,8 @@ func LatestForDeployment(deploymentID string) (string, error) {
 // Returns 0 (without error) when no backups exist — the typical state
 // after `nanokube init` and before the first reboot snapshot. Used by
 // the preflight check to size the next snapshot's headroom.
-func LatestSize() (uint64, error) {
-	names, err := List()
+func LatestSize(l layout.Layout) (uint64, error) {
+	names, err := List(l)
 	if err != nil {
 		return 0, err
 	}
@@ -263,7 +263,7 @@ func LatestSize() (uint64, error) {
 	}
 	candidates := make([]stamped, 0, len(names))
 	for _, n := range names {
-		info, err := os.Stat(filepath.Join(paths.BackupsDir, n))
+		info, err := os.Stat(filepath.Join(l.BackupsDir, n))
 		if err != nil {
 			return 0, err
 		}
@@ -272,7 +272,7 @@ func LatestSize() (uint64, error) {
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
 	})
-	return dirSize(filepath.Join(paths.BackupsDir, candidates[0].name))
+	return dirSize(filepath.Join(l.BackupsDir, candidates[0].name))
 }
 
 func dirSize(root string) (uint64, error) {
@@ -297,12 +297,12 @@ func dirSize(root string) (uint64, error) {
 // Prune drops backups whose deployment id is no longer known to the
 // system (bootc has GCed it) and, for still-known deployments, keeps
 // only the most recent backup per deployment.
-func Prune(knownDeployments []string) error {
+func Prune(l layout.Layout, knownDeployments []string) error {
 	known := make(map[string]bool, len(knownDeployments))
 	for _, d := range knownDeployments {
 		known[d] = true
 	}
-	names, err := List()
+	names, err := List(l)
 	if err != nil {
 		return err
 	}
@@ -310,7 +310,7 @@ func Prune(knownDeployments []string) error {
 	for _, n := range names {
 		deploy, _, _ := strings.Cut(n, "_")
 		if !known[deploy] {
-			if err := os.RemoveAll(filepath.Join(paths.BackupsDir, n)); err != nil {
+			if err := os.RemoveAll(filepath.Join(l.BackupsDir, n)); err != nil {
 				return fmt.Errorf("prune %s: %w", n, err)
 			}
 			continue
@@ -322,12 +322,12 @@ func Prune(knownDeployments []string) error {
 			continue
 		}
 		sort.Slice(group, func(i, j int) bool {
-			ii, _ := os.Stat(filepath.Join(paths.BackupsDir, group[i]))
-			jj, _ := os.Stat(filepath.Join(paths.BackupsDir, group[j]))
+			ii, _ := os.Stat(filepath.Join(l.BackupsDir, group[i]))
+			jj, _ := os.Stat(filepath.Join(l.BackupsDir, group[j]))
 			return ii.ModTime().After(jj.ModTime())
 		})
 		for _, n := range group[1:] {
-			if err := os.RemoveAll(filepath.Join(paths.BackupsDir, n)); err != nil {
+			if err := os.RemoveAll(filepath.Join(l.BackupsDir, n)); err != nil {
 				return fmt.Errorf("prune %s: %w", n, err)
 			}
 		}
@@ -336,8 +336,8 @@ func Prune(knownDeployments []string) error {
 }
 
 // RestoreRequested reports whether the external restore marker is present.
-func RestoreRequested() (bool, error) {
-	_, err := os.Stat(paths.RestoreMarker)
+func RestoreRequested(l layout.Layout) (bool, error) {
+	_, err := os.Stat(l.RestoreMarker)
 	if err == nil {
 		return true, nil
 	}
@@ -348,8 +348,8 @@ func RestoreRequested() (bool, error) {
 }
 
 // ClearRestoreMarker removes the marker after restore has been handled.
-func ClearRestoreMarker() error {
-	if err := os.Remove(paths.RestoreMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
+func ClearRestoreMarker(l layout.Layout) error {
+	if err := os.Remove(l.RestoreMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

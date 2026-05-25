@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/MatchaScript/nanokube/internal/backup"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
@@ -81,7 +82,7 @@ func checkBackupSpace() error {
 		return fmt.Errorf("%s: free %d bytes below minimum %d", paths.BackupsDir, free, MinFreeBytes)
 	}
 
-	latest, err := backup.LatestSize()
+	latest, err := backup.LatestSize(layout.Default())
 	if err != nil {
 		return fmt.Errorf("read latest backup size: %w", err)
 	}

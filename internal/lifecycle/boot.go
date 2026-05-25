@@ -144,7 +144,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	// Create skips.
 	if useBackups && hadPrev && prev.DeploymentID != "" && prev.BootID != "" && prev.BootID != currentBoot {
 		finalDir := filepath.Join(paths.BackupsDir, backup.Name(prev))
-		if err := backup.Create(workspace.BackupTmp, finalDir, prev); err != nil {
+		if err := backup.Create(workspace.BackupTmp, finalDir, prev, layout.Default()); err != nil {
 			return fmt.Errorf("create backup: %w", err)
 		}
 		logf("snapshot of previous boot saved as %s", shortPair(prev.DeploymentID, prev.BootID))
@@ -207,7 +207,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 	if useBackups {
 		if deployments, err := ostree.AllDeploymentIDs(); err != nil {
 			logf("list deployments failed (skipping prune): %v", err)
-		} else if err := backup.Prune(deployments); err != nil {
+		} else if err := backup.Prune(layout.Default(), deployments); err != nil {
 			logf("prune failed (continuing): %v", err)
 		}
 	}
@@ -255,7 +255,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 // boot sees the restored state as the "previous boot". The marker is
 // always cleared so a stray marker cannot cause repeated restores.
 func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
-	requested, err := backup.RestoreRequested()
+	requested, err := backup.RestoreRequested(layout.Default())
 	if err != nil {
 		return err
 	}
@@ -263,7 +263,7 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 		return nil
 	}
 	defer func() {
-		if err := backup.ClearRestoreMarker(); err != nil {
+		if err := backup.ClearRestoreMarker(layout.Default()); err != nil {
 			logf("clear restore marker failed: %v", err)
 		}
 	}()
@@ -273,7 +273,7 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 		_ = state.WriteLastEvent(layout.Default(), "restore requested but no deployment id")
 		return nil
 	}
-	name, err := backup.LatestForDeployment(currentDeployment)
+	name, err := backup.LatestForDeployment(layout.Default(), currentDeployment)
 	if err != nil {
 		return err
 	}
@@ -284,10 +284,10 @@ func maybeRestore(currentDeployment string, logf func(string, ...any)) error {
 	}
 
 	logf("restoring backup %s", name)
-	if err := backup.Restore(name); err != nil {
+	if err := backup.Restore(layout.Default(), name); err != nil {
 		return err
 	}
-	meta, err := backup.ReadMeta(name)
+	meta, err := backup.ReadMeta(layout.Default(), name)
 	if err != nil {
 		return err
 	}
