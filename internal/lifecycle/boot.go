@@ -161,7 +161,7 @@ func Boot(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion st
 		logf("reconcile path (version=%s)", selfVersion)
 	}
 
-	if err := kubeadm.Ensure(cfg, kubeadm.DefaultLayout()); err != nil {
+	if err := kubeadm.Ensure(cfg, layout.Default()); err != nil {
 		return bootFailed(layout.Default(), upgrading, prev.Version, selfVersion, fmt.Errorf("ensure: %w", err))
 	}
 

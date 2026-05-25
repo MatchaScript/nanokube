@@ -10,12 +10,10 @@ import (
 
 	"github.com/MatchaScript/nanokube/internal/certs"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
+	"github.com/MatchaScript/nanokube/internal/layout"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
 
-// Locally duplicated test helpers — package kubeadm_test can't see the
-// unexported helpers in ensure_test.go, and Go's idiomatic answer is to
-// duplicate the trivial setup rather than expose them through a real
-// package.
 func testInitConfig(t *testing.T) *kubeadmapi.InitConfiguration {
 	t.Helper()
 	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
@@ -29,42 +27,28 @@ func testInitConfig(t *testing.T) *kubeadmapi.InitConfiguration {
 	return cfg
 }
 
-func testLayout(t *testing.T) kubeadm.Layout {
+func testLayout(t *testing.T) layout.Layout {
 	t.Helper()
-	root := t.TempDir()
-	return kubeadm.Layout{
-		PKIDir:        filepath.Join(root, "pki"),
-		KubeconfigDir: filepath.Join(root, "kubernetes"),
-		ManifestsDir:  filepath.Join(root, "kubernetes", "manifests"),
-		KubeletDir:    filepath.Join(root, "var", "lib", "kubelet"),
-	}
-}
-
-func certsLayout(l kubeadm.Layout) certs.Layout {
-	return certs.Layout{
-		PKIDir:        l.PKIDir,
-		KubeconfigDir: l.KubeconfigDir,
-	}
+	return layouttest.New(t)
 }
 
 func TestEnsureProducesNonCertArtifacts(t *testing.T) {
 	cfg := testInitConfig(t)
-	layout := testLayout(t)
-	kubeadm.ApplyLayout(cfg, layout)
+	l := testLayout(t)
 
-	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
+	if err := certs.NewSigner(cfg, l).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll: %v", err)
 	}
-	if err := kubeadm.Ensure(cfg, layout); err != nil {
+	if err := kubeadm.Ensure(cfg, l); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
 	checks := []string{
-		filepath.Join(layout.ManifestsDir, "etcd.yaml"),
-		filepath.Join(layout.ManifestsDir, "kube-apiserver.yaml"),
-		filepath.Join(layout.ManifestsDir, "kube-controller-manager.yaml"),
-		filepath.Join(layout.ManifestsDir, "kube-scheduler.yaml"),
-		filepath.Join(layout.KubeletDir, "config.yaml"),
+		filepath.Join(l.ManifestsDir, "etcd.yaml"),
+		filepath.Join(l.ManifestsDir, "kube-apiserver.yaml"),
+		filepath.Join(l.ManifestsDir, "kube-controller-manager.yaml"),
+		filepath.Join(l.ManifestsDir, "kube-scheduler.yaml"),
+		filepath.Join(l.KubeletDir, "config.yaml"),
 	}
 	for _, p := range checks {
 		if _, err := os.Stat(p); err != nil {
@@ -80,15 +64,14 @@ func TestEnsureProducesNonCertArtifacts(t *testing.T) {
 // reconcile boot would silently undo init's deletion.
 func TestEnsureDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
 	cfg := testInitConfig(t)
-	layout := testLayout(t)
-	kubeadm.ApplyLayout(cfg, layout)
-	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
+	l := testLayout(t)
+	if err := certs.NewSigner(cfg, l).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll: %v", err)
 	}
-	if err := kubeadm.Ensure(cfg, layout); err != nil {
+	if err := kubeadm.Ensure(cfg, l); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	path := filepath.Join(layout.KubeconfigDir, "super-admin.conf")
+	path := filepath.Join(l.KubernetesDir, "super-admin.conf")
 	if _, err := os.Stat(path); err == nil {
 		t.Errorf("Ensure unexpectedly produced %s — every reconcile boot would resurrect the break-glass cred", path)
 	}
@@ -100,15 +83,14 @@ func TestEnsureDoesNotProduceSuperAdminKubeconfig(t *testing.T) {
 // exists when something explicitly asks for it.
 func TestWriteSuperAdminKubeconfigProducesFile(t *testing.T) {
 	cfg := testInitConfig(t)
-	layout := testLayout(t)
-	kubeadm.ApplyLayout(cfg, layout)
-	if err := certs.NewSigner(cfg, certsLayout(layout)).EnsureAll(); err != nil {
+	l := testLayout(t)
+	if err := certs.NewSigner(cfg, l).EnsureAll(); err != nil {
 		t.Fatalf("certs.EnsureAll (prerequisite for CA): %v", err)
 	}
-	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, layout); err != nil {
+	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, l); err != nil {
 		t.Fatalf("WriteSuperAdminKubeconfig: %v", err)
 	}
-	path := filepath.Join(layout.KubeconfigDir, "super-admin.conf")
+	path := filepath.Join(l.KubernetesDir, "super-admin.conf")
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("WriteSuperAdminKubeconfig did not produce %s: %v", path, err)
 	}

@@ -9,6 +9,8 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/controlplane"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/etcd"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
+
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // Ensure runs the post-cert kubeadm phases that must hold true on every
@@ -24,24 +26,29 @@ import (
 // Note: super-admin.conf is deliberately NOT touched here.
 // initialize.WriteSuperAdminKubeconfig is the sole writer; recreating
 // it in a per-boot reconcile would defeat its post-init deletion.
-func Ensure(cfg *kubeadmapi.InitConfiguration, layout Layout) error {
-	for _, dir := range []string{layout.ManifestsDir, layout.KubeletDir} {
+func Ensure(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
+	for _, dir := range []string{l.ManifestsDir, l.KubeletDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
 
+	// Pin CertificatesDir on a private copy of cfg (was ApplyLayout's job).
+	own := *cfg
+	own.CertificatesDir = l.PKIDir
+	cfg = &own
+
 	const patchesDir = ""
 	const isDryRun = false
 
 	if err := etcd.CreateLocalEtcdStaticPodManifestFile(
-		layout.ManifestsDir, patchesDir, cfg.NodeRegistration.Name, &cfg.ClusterConfiguration, &cfg.LocalAPIEndpoint, isDryRun,
+		l.ManifestsDir, patchesDir, cfg.NodeRegistration.Name, &cfg.ClusterConfiguration, &cfg.LocalAPIEndpoint, isDryRun,
 	); err != nil {
 		return fmt.Errorf("create etcd manifest: %w", err)
 	}
 
 	if err := controlplane.CreateInitStaticPodManifestFiles(
-		layout.ManifestsDir, patchesDir, cfg, isDryRun,
+		l.ManifestsDir, patchesDir, cfg, isDryRun,
 	); err != nil {
 		return fmt.Errorf("create control plane manifests: %w", err)
 	}
@@ -50,16 +57,16 @@ func Ensure(cfg *kubeadmapi.InitConfiguration, layout Layout) error {
 	// WriteConfigToDisk reads the instance file as a patch when the
 	// NodeLocalCRISocket feature gate is on (GA+locked as of k8s v1.36),
 	// so the instance file must be written first.
-	if err := kubelet.WriteKubeletDynamicEnvFile(&cfg.ClusterConfiguration, &cfg.NodeRegistration, false, layout.KubeletDir); err != nil {
+	if err := kubelet.WriteKubeletDynamicEnvFile(&cfg.ClusterConfiguration, &cfg.NodeRegistration, false, l.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet env file: %w", err)
 	}
 	instance := &kubeletconfigv1beta1.KubeletConfiguration{
 		ContainerRuntimeEndpoint: cfg.NodeRegistration.CRISocket,
 	}
-	if err := kubelet.WriteInstanceConfigToDisk(instance, layout.KubeletDir); err != nil {
+	if err := kubelet.WriteInstanceConfigToDisk(instance, l.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet instance config: %w", err)
 	}
-	if err := kubelet.WriteConfigToDisk(&cfg.ClusterConfiguration, layout.KubeletDir, patchesDir, os.Stderr); err != nil {
+	if err := kubelet.WriteConfigToDisk(&cfg.ClusterConfiguration, l.KubeletDir, patchesDir, os.Stderr); err != nil {
 		return fmt.Errorf("write kubelet config: %w", err)
 	}
 

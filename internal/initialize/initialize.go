@@ -52,7 +52,7 @@ import (
 func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion string, out io.Writer) error {
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[init] "+format+"\n", a...) }
 
-	kl := kubeadm.DefaultLayout()
+	l := layout.Default()
 	nodeName := cfg.NodeRegistration.Name
 
 	isOSTree, err := ostree.IsOSTree()
@@ -66,9 +66,9 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 	if err := certs.Init(cfg, layout.Default()); err != nil {
 		return fmt.Errorf("certs init: %w", err)
 	}
-	logf("provisioned PKI under %s", kl.PKIDir)
+	logf("provisioned PKI under %s", l.PKIDir)
 
-	if err := kubeadm.Ensure(cfg, kl); err != nil {
+	if err := kubeadm.Ensure(cfg, l); err != nil {
 		return fmt.Errorf("ensure: %w", err)
 	}
 	logf("rendered static pod manifests and kubelet config")
@@ -77,7 +77,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, selfVersion str
 	// authenticate as system:masters; removeSuperAdminKubeconfig deletes
 	// it again before this function returns. Ensure deliberately does not
 	// produce super-admin.conf so reconcile boots cannot regenerate it.
-	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, kl); err != nil {
+	if err := kubeadm.WriteSuperAdminKubeconfig(cfg, l); err != nil {
 		return err
 	}
 

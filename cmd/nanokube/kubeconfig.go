@@ -7,7 +7,6 @@ import (
 
 	"github.com/MatchaScript/nanokube/internal/config"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
-	"github.com/MatchaScript/nanokube/internal/paths"
 )
 
 func newKubeconfigCmd(g *globalOpts) *cobra.Command {
@@ -40,10 +39,10 @@ func newKubeconfigSuperAdminCmd(g *globalOpts) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := kubeadm.WriteSuperAdminKubeconfig(cfg, kubeadm.DefaultLayout()); err != nil {
+			if err := kubeadm.WriteSuperAdminKubeconfig(cfg, g.layout); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", paths.SuperAdminKubeconfig)
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", g.layout.SuperAdminKubeconfig)
 			return nil
 		},
 	}
