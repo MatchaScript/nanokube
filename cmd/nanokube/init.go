@@ -43,7 +43,7 @@ func newInitCmd(g *globalOpts) *cobra.Command {
 			if existed {
 				return errors.New("nanokube state already exists; run `nanokube reset --yes` first to re-initialise")
 			}
-			cfg, err := config.Load(g.configPath)
+			cfg, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}

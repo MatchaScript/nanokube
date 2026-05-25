@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
 
 // writeTempFile drops body into a fresh file under t.TempDir() and
@@ -45,7 +45,8 @@ networking:
 `
 
 func TestLoad_MinimalConfigParsesAndDefaults(t *testing.T) {
-	cfg, err := Load(writeTempFile(t, minimalConfig))
+	l := layouttest.New(t)
+	cfg, err := Load(writeTempFile(t, minimalConfig), l)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -55,13 +56,14 @@ func TestLoad_MinimalConfigParsesAndDefaults(t *testing.T) {
 	if cfg.LocalAPIEndpoint.BindPort != 6443 {
 		t.Errorf("BindPort = %d; expected kubeadm default 6443", cfg.LocalAPIEndpoint.BindPort)
 	}
-	if cfg.CertificatesDir != paths.PKIDir {
-		t.Errorf("CertificatesDir = %q; want pinned %q", cfg.CertificatesDir, paths.PKIDir)
+	if cfg.CertificatesDir != l.PKIDir {
+		t.Errorf("CertificatesDir = %q; want pinned %q", cfg.CertificatesDir, l.PKIDir)
 	}
 }
 
 func TestLoad_FileNotFoundSurfacesPath(t *testing.T) {
-	_, err := Load("/tmp/nanokube-does-not-exist-hopefully")
+	l := layouttest.New(t)
+	_, err := Load("/tmp/nanokube-does-not-exist-hopefully", l)
 	if err == nil {
 		t.Fatal("Load of missing file = nil")
 	}
@@ -71,9 +73,10 @@ func TestLoad_FileNotFoundSurfacesPath(t *testing.T) {
 }
 
 func TestLoad_RejectsMissingWrapper(t *testing.T) {
+	l := layouttest.New(t)
 	// Strip the NanoKubeConfig wrapper out of the minimal config.
 	body := strings.SplitN(minimalConfig, "---\n", 2)[1]
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err == nil || !strings.Contains(err.Error(), "NanoKubeConfig") {
 		t.Fatalf("Load = %v; want NanoKubeConfig-not-found error", err)
 	}
@@ -82,6 +85,7 @@ func TestLoad_RejectsMissingWrapper(t *testing.T) {
 // JoinConfiguration is unimplemented and should be rejected with a
 // clear message rather than silently parsed.
 func TestLoad_RejectsJoinConfiguration(t *testing.T) {
+	l := layouttest.New(t)
 	body := minimalConfig + `---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: JoinConfiguration
@@ -91,35 +95,38 @@ discovery:
     apiServerEndpoint: 10.0.0.1:6443
     unsafeSkipCAVerification: true
 `
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err == nil || !strings.Contains(err.Error(), "JoinConfiguration") {
 		t.Fatalf("Load = %v; want JoinConfiguration-not-supported error", err)
 	}
 }
 
 func TestLoad_RejectsCertificatesDirOverride(t *testing.T) {
+	l := layouttest.New(t)
 	body := minimalConfig + "certificatesDir: /tmp/elsewhere\n"
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err == nil || !strings.Contains(err.Error(), "certificatesDir") {
 		t.Fatalf("Load = %v; want certificatesDir mismatch error", err)
 	}
 }
 
 func TestLoad_RejectsMismatchedKubernetesVersion(t *testing.T) {
+	l := layouttest.New(t)
 	// Use a syntactically valid Kubernetes version that does not match
 	// the one pinned in this image — kubeadm itself rejects unparseable
 	// values (e.g. v0.0.1-evil) before our gate runs, so the gate-under
 	// -test is only reachable with a version kubeadm accepts.
 	body := strings.Replace(minimalConfig, "kubernetesVersion: v1.35.0", "kubernetesVersion: v1.34.0", 1)
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err == nil || !strings.Contains(err.Error(), "kubernetesVersion") {
 		t.Fatalf("Load = %v; want kubernetesVersion mismatch error", err)
 	}
 }
 
 func TestLoad_MalformedYAML(t *testing.T) {
+	l := layouttest.New(t)
 	body := "this: is: not valid: yaml: at all"
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err == nil {
 		t.Fatal("Load of malformed yaml = nil")
 	}
@@ -132,6 +139,7 @@ func TestLoad_MalformedYAML(t *testing.T) {
 // which catches the day kubeadm drops support and Load starts
 // returning an error.
 func TestLoad_DeprecatedAPIVersionStillLoads(t *testing.T) {
+	l := layouttest.New(t)
 	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
 kind: NanoKubeConfig
 metadata:
@@ -151,7 +159,7 @@ networking:
   serviceSubnet: 10.96.0.0/12
   podSubnet: 10.244.0.0/16
 `
-	_, err := Load(writeTempFile(t, body))
+	_, err := Load(writeTempFile(t, body), l)
 	if err != nil {
 		t.Fatalf("Load(v1beta3) = %v; v1beta3 should still be accepted with a deprecation warning. "+
 			"If kubeadm has dropped v1beta3 support, update this test together with the README to "+
@@ -160,7 +168,8 @@ networking:
 }
 
 func TestMarshal_RoundTripsThroughLoad(t *testing.T) {
-	in, err := Load(writeTempFile(t, minimalConfig))
+	l := layouttest.New(t)
+	in, err := Load(writeTempFile(t, minimalConfig), l)
 	if err != nil {
 		t.Fatalf("Load(minimal): %v", err)
 	}
@@ -172,7 +181,7 @@ func TestMarshal_RoundTripsThroughLoad(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	out, err := Load(writeTempFile(t, string(data)))
+	out, err := Load(writeTempFile(t, string(data)), l)
 	if err != nil {
 		t.Fatalf("Load after Marshal: %v", err)
 	}

@@ -23,7 +23,7 @@ func newBootCmd(g *globalOpts) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(g.configPath)
+			cfg, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}

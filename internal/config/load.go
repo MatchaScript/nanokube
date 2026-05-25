@@ -25,27 +25,27 @@ import (
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // Load reads the multi-document YAML at path, parses both the
 // NanoKubeConfig wrapper and the sibling kubeadm documents, applies
 // defaults, validates, and returns the upstream kubeadm internal
 // InitConfiguration that downstream packages consume directly.
-func Load(path string) (*kubeadmapi.InitConfiguration, error) {
+func Load(path string, l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	return parse(data, path)
+	return parse(data, path, l)
 }
 
-// LoadDefault reads the canonical /etc/nanokube/config.yaml.
-func LoadDefault() (*kubeadmapi.InitConfiguration, error) {
-	return Load(paths.ConfigFile)
+// LoadDefault reads the canonical config file for the given layout.
+func LoadDefault(l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
+	return Load(l.ConfigFile, l)
 }
 
-func parse(data []byte, source string) (*kubeadmapi.InitConfiguration, error) {
+func parse(data []byte, source string, l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
 	gvkmap, err := kubeadmutil.SplitConfigDocuments(data)
 	if err != nil {
 		return nil, fmt.Errorf("split %s: %w", source, err)
@@ -75,7 +75,16 @@ func parse(data []byte, source string) (*kubeadmapi.InitConfiguration, error) {
 		return nil, fmt.Errorf("parse kubeadm portion of %s: %w", source, err)
 	}
 
-	if err := v1alpha1.Validate(wrapper, kubeadmCfg); err != nil {
+	// kubeadm's defaulter fills CertificatesDir with its own canonical
+	// path even when the user left it unset. Restore the empty-string
+	// sentinel before validating so Validate only sees values the user
+	// explicitly wrote — the empty-string branch is "OK", and we pin
+	// l.PKIDir unconditionally afterward.
+	if kubeadmCfg.CertificatesDir == kubeadmapiv1.DefaultCertificatesDir {
+		kubeadmCfg.CertificatesDir = ""
+	}
+
+	if err := v1alpha1.Validate(wrapper, kubeadmCfg, l); err != nil {
 		return nil, fmt.Errorf("validate %s: %w", source, err)
 	}
 
@@ -86,7 +95,7 @@ func parse(data []byte, source string) (*kubeadmapi.InitConfiguration, error) {
 	// paths.PKIDir today) — normalising here keeps every downstream
 	// reader on a single canonical path even if paths.PKIDir is
 	// retargeted in the future.
-	kubeadmCfg.CertificatesDir = paths.PKIDir
+	kubeadmCfg.CertificatesDir = l.PKIDir
 	return kubeadmCfg, nil
 }
 

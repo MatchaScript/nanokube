@@ -6,7 +6,7 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 
-	"github.com/MatchaScript/nanokube/internal/paths"
+	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/version"
 )
 
@@ -16,7 +16,7 @@ import (
 // constraints that belong to nanokube's deployment model.
 //
 // Defaults must be applied to wrapper before calling Validate.
-func Validate(wrapper *NanoKubeConfig, kubeadmCfg *kubeadmapi.InitConfiguration) error {
+func Validate(wrapper *NanoKubeConfig, kubeadmCfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
 	var errs []error
 
 	if wrapper.APIVersion != APIVersion {
@@ -41,10 +41,10 @@ func Validate(wrapper *NanoKubeConfig, kubeadmCfg *kubeadmapi.InitConfiguration)
 	// CertificatesDir lives at a fixed on-disk location on bootc nodes.
 	// Reject explicit non-matching values so configuration drift surfaces
 	// loudly. (config.Load also normalises this post-validate, so the
-	// downstream view is always paths.PKIDir.)
-	if d := kubeadmCfg.ClusterConfiguration.CertificatesDir; d != "" && d != paths.PKIDir {
+	// downstream view is always l.PKIDir.)
+	if d := kubeadmCfg.ClusterConfiguration.CertificatesDir; d != "" && d != l.PKIDir {
 		errs = append(errs, fmt.Errorf("ClusterConfiguration.certificatesDir %q does not match this image's PKI directory (%s); leave it unset",
-			d, paths.PKIDir))
+			d, l.PKIDir))
 	}
 
 	return errors.Join(errs...)

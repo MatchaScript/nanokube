@@ -58,7 +58,7 @@ func newConfigValidateCmd(g *globalOpts) *cobra.Command {
 		Short: "Load the config file, apply defaults, and validate it",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(g.configPath)
+			cfg, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}
