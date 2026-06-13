@@ -35,11 +35,11 @@ func newKubeconfigSuperAdminCmd(g *globalOpts) *cobra.Command {
 			"apiserver. Delete the file again once recovery is complete.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(g.configPath, g.layout)
+			loaded, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}
-			if err := kubeadm.WriteSuperAdminKubeconfig(cfg, g.layout); err != nil {
+			if err := kubeadm.WriteSuperAdminKubeconfig(loaded.Init, g.layout); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", g.layout.SuperAdminKubeconfig)

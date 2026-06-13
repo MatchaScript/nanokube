@@ -6,6 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
+
 	v1alpha1 "github.com/MatchaScript/nanokube/internal/apis/bootstrap/v1alpha1"
 	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
@@ -46,10 +50,14 @@ networking:
 
 func TestLoad_MinimalConfigParsesAndDefaults(t *testing.T) {
 	l := layouttest.New(t)
-	cfg, err := Load(writeTempFile(t, minimalConfig), l)
+	loaded, err := Load(writeTempFile(t, minimalConfig), l)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if loaded.HasJoin {
+		t.Error("HasJoin: got true, want false for init shape")
+	}
+	cfg := loaded.Init
 	if cfg.LocalAPIEndpoint.AdvertiseAddress != "192.168.1.10" {
 		t.Errorf("AdvertiseAddress = %q", cfg.LocalAPIEndpoint.AdvertiseAddress)
 	}
@@ -82,22 +90,86 @@ func TestLoad_RejectsMissingWrapper(t *testing.T) {
 	}
 }
 
-// JoinConfiguration is unimplemented and should be rejected with a
-// clear message rather than silently parsed.
-func TestLoad_RejectsJoinConfiguration(t *testing.T) {
-	l := layouttest.New(t)
-	body := minimalConfig + `---
+// joinConfig is the CABPK-style joined-node shape: wrapper +
+// JoinConfiguration + ClusterConfiguration, with NO InitConfiguration
+// document. NodeRegistration is reproduced by kubeadm's dynamic
+// defaulting at load time, so the Join doc carries no node identity.
+const joinConfig = `apiVersion: bootstrap.nanokube.io/v1alpha1
+kind: NanoKubeConfig
+---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: JoinConfiguration
 discovery:
-  bootstrapToken:
-    token: aaaaaa.bbbbbbbbbbbbbbbb
-    apiServerEndpoint: 10.0.0.1:6443
-    unsafeSkipCAVerification: true
+  file:
+    kubeConfigPath: /etc/kubernetes/kubelet.conf
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+controlPlaneEndpoint: cp.example.test:6443
+`
+
+func TestLoad_JoinShape(t *testing.T) {
+	l := layouttest.New(t)
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte(joinConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(p, l)
+	if err != nil {
+		t.Fatalf("Load join shape: %v", err)
+	}
+	if !loaded.HasJoin {
+		t.Error("HasJoin: got false, want true")
+	}
+	if loaded.Init.ControlPlaneEndpoint != "cp.example.test:6443" {
+		t.Errorf("controlPlaneEndpoint: got %q", loaded.Init.ControlPlaneEndpoint)
+	}
+	if loaded.Init.NodeRegistration.Name == "" {
+		t.Error("NodeRegistration.Name not dynamically defaulted")
+	}
+}
+
+func TestLoad_RejectsInitAndJoinTogether(t *testing.T) {
+	l := layouttest.New(t)
+	// The join shape plus an InitConfiguration document: CABPK either/or
+	// is violated, Load must reject it.
+	body := joinConfig + `---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.1.10
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+`
+	_, err := Load(writeTempFile(t, body), l)
+	if err == nil || !strings.Contains(err.Error(), "either") {
+		t.Fatalf("Load = %v; want either/or rejection error", err)
+	}
+}
+
+func TestLoad_RejectsMalformedJoinDoc(t *testing.T) {
+	l := layouttest.New(t)
+	// An unknown field in the JoinConfiguration document must fail the
+	// strict unmarshal that validates the doc for well-formedness.
+	body := `apiVersion: bootstrap.nanokube.io/v1alpha1
+kind: NanoKubeConfig
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+bogus: true
+discovery:
+  file:
+    kubeConfigPath: /etc/kubernetes/kubelet.conf
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.35.0
+controlPlaneEndpoint: cp.example.test:6443
 `
 	_, err := Load(writeTempFile(t, body), l)
 	if err == nil || !strings.Contains(err.Error(), "JoinConfiguration") {
-		t.Fatalf("Load = %v; want JoinConfiguration-not-supported error", err)
+		t.Fatalf("Load = %v; want malformed JoinConfiguration error", err)
 	}
 }
 
@@ -159,11 +231,14 @@ networking:
   serviceSubnet: 10.96.0.0/12
   podSubnet: 10.244.0.0/16
 `
-	_, err := Load(writeTempFile(t, body), l)
+	loaded, err := Load(writeTempFile(t, body), l)
 	if err != nil {
 		t.Fatalf("Load(v1beta3) = %v; v1beta3 should still be accepted with a deprecation warning. "+
 			"If kubeadm has dropped v1beta3 support, update this test together with the README to "+
 			"document the new minimum supported version.", err)
+	}
+	if loaded.HasJoin {
+		t.Error("HasJoin: got true, want false for init shape")
 	}
 }
 
@@ -176,7 +251,7 @@ func TestMarshal_RoundTripsThroughLoad(t *testing.T) {
 
 	// Marshal needs the wrapper too; reconstruct a default one since
 	// the loader does not preserve the wrapper (its Spec is empty).
-	data, err := Marshal(v1alpha1.NewDefault(), in)
+	data, err := Marshal(v1alpha1.NewDefault(), in.Init)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -185,8 +260,67 @@ func TestMarshal_RoundTripsThroughLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after Marshal: %v", err)
 	}
-	if out.LocalAPIEndpoint.AdvertiseAddress != in.LocalAPIEndpoint.AdvertiseAddress {
+	if out.Init.LocalAPIEndpoint.AdvertiseAddress != in.Init.LocalAPIEndpoint.AdvertiseAddress {
 		t.Errorf("advertiseAddress round-trip: %q -> %q",
-			in.LocalAPIEndpoint.AdvertiseAddress, out.LocalAPIEndpoint.AdvertiseAddress)
+			in.Init.LocalAPIEndpoint.AdvertiseAddress, out.Init.LocalAPIEndpoint.AdvertiseAddress)
+	}
+}
+
+func TestMarshalJoin_RoundTripsThroughLoad(t *testing.T) {
+	l := layouttest.New(t)
+
+	// A defaulted internal config gives us a ClusterConfiguration that
+	// already carries the kubelet ComponentConfig, so the round-trip
+	// exercises the kubelet-config document path too.
+	base, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
+	}
+	clusterCfg := base.ClusterConfiguration.DeepCopy()
+	clusterCfg.KubernetesVersion = "v1.35.0"
+	clusterCfg.ControlPlaneEndpoint = "cp.example.test:6443"
+
+	wrapper := v1alpha1.NewDefault()
+
+	// Build the JoinConfiguration the way a real add-node caller will:
+	// through kubeadm's defaulter so Timeouts and the other invariants
+	// the serializer relies on are populated. SkipCRIDetect avoids the
+	// host CRI probe; the kubeConfigPath must exist on disk because the
+	// defaulter validates it, so point at a temp file.
+	kubeconfigPath := filepath.Join(t.TempDir(), "kubelet.conf")
+	if err := os.WriteFile(kubeconfigPath, []byte("apiVersion: v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	joinCfg, err := kubeadmconfig.DefaultedJoinConfiguration(
+		&kubeadmapiv1.JoinConfiguration{
+			Discovery: kubeadmapiv1.Discovery{
+				File: &kubeadmapiv1.FileDiscovery{
+					KubeConfigPath: kubeconfigPath,
+				},
+			},
+		},
+		kubeadmconfig.LoadOrDefaultConfigurationOptions{SkipCRIDetect: true},
+	)
+	if err != nil {
+		t.Fatalf("DefaultedJoinConfiguration: %v", err)
+	}
+
+	data, err := MarshalJoin(wrapper, joinCfg, clusterCfg)
+	if err != nil {
+		t.Fatalf("MarshalJoin: %v", err)
+	}
+
+	loaded, err := Load(writeTempFile(t, string(data)), l)
+	if err != nil {
+		t.Fatalf("Load after MarshalJoin: %v\n--- marshalled ---\n%s", err, data)
+	}
+	if !loaded.HasJoin {
+		t.Error("HasJoin: got false, want true after MarshalJoin round-trip")
+	}
+	if loaded.Init.ControlPlaneEndpoint != "cp.example.test:6443" {
+		t.Errorf("controlPlaneEndpoint round-trip: got %q", loaded.Init.ControlPlaneEndpoint)
+	}
+	if _, ok := loaded.Init.ClusterConfiguration.ComponentConfigs[componentconfigs.KubeletGroup]; !ok {
+		t.Error("kubelet ComponentConfig did not survive MarshalJoin round-trip")
 	}
 }

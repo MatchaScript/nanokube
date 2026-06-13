@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 	"sigs.k8s.io/yaml"
@@ -28,11 +29,21 @@ import (
 	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
+// Loaded is the parsed on-disk configuration. HasJoin reports that the
+// file carries a JoinConfiguration document — the CABPK-style marker
+// that this node joined an existing cluster (worker, or later an added
+// control plane). The role AUTHORITY is last-boot.json; Boot
+// cross-checks it against this shape and fails on mismatch.
+type Loaded struct {
+	Init    *kubeadmapi.InitConfiguration
+	HasJoin bool
+}
+
 // Load reads the multi-document YAML at path, parses both the
 // NanoKubeConfig wrapper and the sibling kubeadm documents, applies
 // defaults, validates, and returns the upstream kubeadm internal
 // InitConfiguration that downstream packages consume directly.
-func Load(path string, l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
+func Load(path string, l layout.Layout) (*Loaded, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -41,23 +52,40 @@ func Load(path string, l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
 }
 
 // LoadDefault reads the canonical config file for the given layout.
-func LoadDefault(l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
+func LoadDefault(l layout.Layout) (*Loaded, error) {
 	return Load(l.ConfigFile, l)
 }
 
-func parse(data []byte, source string, l layout.Layout) (*kubeadmapi.InitConfiguration, error) {
+func parse(data []byte, source string, l layout.Layout) (*Loaded, error) {
 	gvkmap, err := kubeadmutil.SplitConfigDocuments(data)
 	if err != nil {
 		return nil, fmt.Errorf("split %s: %w", source, err)
 	}
 
-	// JoinConfiguration is unimplemented; reject early with a clear
-	// error rather than letting kubeadm parse a document we will never
-	// act on.
-	for gvk := range gvkmap {
-		if gvk.Group == kubeadmapiv1.SchemeGroupVersion.Group && gvk.Kind == "JoinConfiguration" {
-			return nil, fmt.Errorf("parse %s: JoinConfiguration is not supported yet; multi-node bootstrap is on the roadmap", source)
+	// A JoinConfiguration document marks a joined node (CABPK-style
+	// either/or shape). Its contents are validated for well-formedness
+	// and then dropped: NodeRegistration is reproduced by kubeadm's
+	// dynamic defaulting below, identically to the init path, so no
+	// field merging ever happens.
+	hasJoin := false
+	hasInit := false
+	for gvk, doc := range gvkmap {
+		if gvk.Group != kubeadmapiv1.SchemeGroupVersion.Group {
+			continue
 		}
+		switch gvk.Kind {
+		case "JoinConfiguration":
+			if err := yaml.UnmarshalStrict(doc, &kubeadmapiv1.JoinConfiguration{}); err != nil {
+				return nil, fmt.Errorf("parse %s JoinConfiguration: %w", source, err)
+			}
+			hasJoin = true
+			delete(gvkmap, gvk)
+		case "InitConfiguration":
+			hasInit = true
+		}
+	}
+	if hasJoin && hasInit {
+		return nil, fmt.Errorf("parse %s: config must carry either an InitConfiguration or a JoinConfiguration document, not both", source)
 	}
 
 	// Pull the nanokube wrapper out of the map before handing the rest
@@ -96,7 +124,7 @@ func parse(data []byte, source string, l layout.Layout) (*kubeadmapi.InitConfigu
 	// reader on a single canonical path even if paths.PKIDir is
 	// retargeted in the future.
 	kubeadmCfg.CertificatesDir = l.PKIDir
-	return kubeadmCfg, nil
+	return &Loaded{Init: kubeadmCfg, HasJoin: hasJoin}, nil
 }
 
 func extractWrapper(gvkmap kubeadmapi.DocumentMap, source string) (*v1alpha1.NanoKubeConfig, error) {
@@ -163,5 +191,56 @@ func Marshal(wrapper *v1alpha1.NanoKubeConfig, kubeadmCfg *kubeadmapi.InitConfig
 	}
 	buf.WriteString("---\n")
 	buf.Write(kubeadmBytes)
+	return buf.Bytes(), nil
+}
+
+// MarshalJoin serialises the joined-node config shape: wrapper +
+// JoinConfiguration + ClusterConfiguration + the kubelet component
+// config, as a multi-document YAML stream. The ClusterConfiguration and
+// kubelet config are the node-local CACHE of the cluster's
+// kubeadm-config / kubelet-config ConfigMaps, so Boot can re-render
+// kubelet files offline.
+func MarshalJoin(wrapper *v1alpha1.NanoKubeConfig, joinCfg *kubeadmapi.JoinConfiguration, clusterCfg *kubeadmapi.ClusterConfiguration) ([]byte, error) {
+	docs := [][]byte{}
+
+	// Ensure the wrapper carries apiVersion/kind so Load recognises the
+	// document on round-trip; yaml.Marshal omits empty TypeMeta fields.
+	v1alpha1.SetDefaults(wrapper)
+	wrapperBytes, err := yaml.Marshal(wrapper)
+	if err != nil {
+		return nil, fmt.Errorf("marshal wrapper: %w", err)
+	}
+	docs = append(docs, wrapperBytes)
+
+	joinBytes, err := kubeadmconfig.MarshalKubeadmConfigObject(joinCfg, kubeadmapiv1.SchemeGroupVersion)
+	if err != nil {
+		return nil, fmt.Errorf("marshal JoinConfiguration: %w", err)
+	}
+	docs = append(docs, joinBytes)
+
+	clusterBytes, err := kubeadmconfig.MarshalKubeadmConfigObject(clusterCfg, kubeadmapiv1.SchemeGroupVersion)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ClusterConfiguration: %w", err)
+	}
+	docs = append(docs, clusterBytes)
+
+	if kc, ok := clusterCfg.ComponentConfigs[componentconfigs.KubeletGroup]; ok {
+		kcBytes, err := kc.Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("marshal kubelet component config: %w", err)
+		}
+		docs = append(docs, kcBytes)
+	}
+
+	var buf bytes.Buffer
+	for i, d := range docs {
+		if i > 0 {
+			buf.WriteString("---\n")
+		}
+		buf.Write(d)
+		if len(d) == 0 || d[len(d)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+	}
 	return buf.Bytes(), nil
 }

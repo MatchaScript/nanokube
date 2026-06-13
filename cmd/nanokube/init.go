@@ -43,11 +43,14 @@ func newInitCmd(g *globalOpts) *cobra.Command {
 			if existed {
 				return errors.New("nanokube state already exists; run `nanokube reset --yes` first to re-initialise")
 			}
-			cfg, err := config.Load(g.configPath, g.layout)
+			loaded, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}
-			return initialize.Run(cmd.Context(), cfg, g.layout, version.KubernetesVersion, cmd.OutOrStdout())
+			if loaded.HasJoin {
+				return fmt.Errorf("config %s describes a joined node (JoinConfiguration); `nanokube init` bootstraps a new cluster — use `nanokube add-node`", g.configPath)
+			}
+			return initialize.Run(cmd.Context(), loaded.Init, g.layout, version.KubernetesVersion, cmd.OutOrStdout())
 		},
 	}
 }

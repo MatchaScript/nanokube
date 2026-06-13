@@ -23,12 +23,12 @@ func newBootCmd(g *globalOpts) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(g.configPath, g.layout)
+			loaded, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
-			if err := boot.Run(ctx, cfg, g.layout, version.KubernetesVersion, cmd.ErrOrStderr()); err != nil {
+			if err := boot.Run(ctx, loaded.Init, g.layout, version.KubernetesVersion, cmd.ErrOrStderr()); err != nil {
 				return err
 			}
 			// Healthy boot complete. Park here until systemd asks us to

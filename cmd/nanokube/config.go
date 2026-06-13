@@ -58,10 +58,11 @@ func newConfigValidateCmd(g *globalOpts) *cobra.Command {
 		Short: "Load the config file, apply defaults, and validate it",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(g.configPath, g.layout)
+			loaded, err := config.Load(g.configPath, g.layout)
 			if err != nil {
 				return err
 			}
+			cfg := loaded.Init
 			fmt.Fprintf(cmd.OutOrStdout(), "config %s is valid (kubernetesVersion=%s, advertiseAddress=%s, nodeName=%s)\n",
 				g.configPath, version.KubernetesVersion, cfg.LocalAPIEndpoint.AdvertiseAddress, cfg.NodeRegistration.Name)
 			return nil
