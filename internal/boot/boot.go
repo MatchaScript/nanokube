@@ -191,6 +191,12 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}
 
+	if changed, err := kubeadm.FinalizeKubeletKubeconfig(l); err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("finalize kubelet.conf: %w", err))
+	} else if changed {
+		logf("kubelet.conf repointed at kubelet-client-current.pem")
+	}
+
 	if err := startKubelet(ctx, logf); err != nil {
 		return bootFailed(l, upgrading, prev.Version, selfVersion, err)
 	}

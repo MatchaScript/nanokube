@@ -21,9 +21,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
@@ -127,6 +130,10 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		return fmt.Errorf("addons: %w", err)
 	}
 
+	if err := finalizeKubeletConf(ctx, l, logf); err != nil {
+		return err
+	}
+
 	if err := writeFirstBootState(l, selfVersion, isOSTree); err != nil {
 		return err
 	}
@@ -209,5 +216,39 @@ func waitControlPlane(ctx context.Context, client kubernetes.Interface, nodeName
 		return err
 	}
 	logf("control plane ready")
+	return nil
+}
+
+// finalizeKubeletConf waits briefly for the kubelet's rotation store to
+// appear (the kubelet files its first rotation CSR right after start;
+// the autoapprove CRBs from EnsureJoinPrereqs let the KCM approve it
+// within seconds) and then repoints kubelet.conf at the rotating
+// credential, restarting kubelet to apply — same as kubeadm init's
+// kubelet-finalize phase. A timeout is not fatal: every subsequent
+// `nanokube boot` retries via the same FinalizeKubeletKubeconfig call.
+func finalizeKubeletConf(ctx context.Context, l layout.Layout, logf func(string, ...any)) error {
+	pem := filepath.Join(l.KubeletDir, "pki", "kubelet-client-current.pem")
+	wctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	err := wait.PollUntilContextCancel(wctx, 2*time.Second, true, func(context.Context) (bool, error) {
+		_, statErr := os.Stat(pem)
+		return statErr == nil, nil
+	})
+	if err != nil {
+		logf("kubelet rotation store not ready yet; kubelet.conf finalize deferred to next boot")
+		return nil
+	}
+	changed, err := kubeadm.FinalizeKubeletKubeconfig(l)
+	if err != nil {
+		return fmt.Errorf("finalize kubelet.conf: %w", err)
+	}
+	if !changed {
+		return nil
+	}
+	logf("kubelet.conf repointed at kubelet-client-current.pem; restarting kubelet")
+	cmd := exec.CommandContext(ctx, "systemctl", "restart", "kubelet.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl restart kubelet: %v: %s", err, out)
+	}
 	return nil
 }
