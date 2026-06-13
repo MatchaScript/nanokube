@@ -25,7 +25,16 @@ func FinalizeKubeletKubeconfig(l layout.Layout) (bool, error) {
 		return false, err
 	}
 
+	// A missing kubelet.conf is not an error: on a worker the file is
+	// written solely by the kubelet's TLS bootstrap, and the kubelet
+	// persists the rotation store BEFORE writing kubelet.conf — a crash
+	// in that window leaves "pem present, kubelet.conf absent". Treat it
+	// like the missing-pem case so the boot proceeds and the kubelet can
+	// finish its bootstrap on start.
 	kc, err := clientcmd.LoadFromFile(l.KubeletKubeconfig)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("load kubelet.conf: %w", err)
 	}

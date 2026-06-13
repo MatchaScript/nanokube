@@ -68,3 +68,23 @@ func TestFinalizeKubeletKubeconfig(t *testing.T) {
 		t.Fatalf("second finalize: changed=%v err=%v, want false,nil", changed, err)
 	}
 }
+
+// A crash between the kubelet persisting its rotation store and writing
+// kubelet.conf leaves "pem present, kubelet.conf absent" on a worker's
+// next boot. Finalize must no-op so the kubelet can finish its
+// bootstrap, not fail the boot.
+func TestFinalizeKubeletKubeconfig_NoKubeletConfIsNoOp(t *testing.T) {
+	l := layouttest.New(t)
+	pem := filepath.Join(l.KubeletDir, "pki", "kubelet-client-current.pem")
+	if err := os.MkdirAll(filepath.Dir(pem), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pem, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := FinalizeKubeletKubeconfig(l)
+	if err != nil || changed {
+		t.Fatalf("missing kubelet.conf: changed=%v err=%v, want false,nil", changed, err)
+	}
+}
