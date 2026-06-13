@@ -62,6 +62,7 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/markcontrolplane"
 
@@ -221,6 +222,14 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("mark control-plane: %w", err))
 	}
 
+	adminCfg, err := clientcmd.LoadFromFile(l.AdminKubeconfig)
+	if err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("load admin kubeconfig: %w", err))
+	}
+	if err := kubeadm.EnsureJoinPrereqs(cfg, client, adminCfg); err != nil {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, fmt.Errorf("join prereqs: %w", err))
+	}
+
 	// CR8: addon failure is fatal, matching `nanokube init` and upstream
 	// kubeadm. The previous log-and-continue was asymmetric and let a
 	// boot succeed when the cluster was missing CoreDNS / kube-proxy.
@@ -248,9 +257,11 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	// name; backup.Create is idempotent on duplicates) — strictly less
 	// damaging than rolling back a healthy cluster.
 	if err := state.WriteLastBoot(l, state.LastBoot{
-		Version:      selfVersion,
-		DeploymentID: currentDeployment,
-		BootID:       currentBoot,
+		Version:       selfVersion,
+		DeploymentID:  currentDeployment,
+		BootID:        currentBoot,
+		Role:          prev.RoleOrDefault(),
+		APIServerURLs: prev.APIServerURLs,
 	}); err != nil {
 		logf("write last-boot failed (continuing): %v", err)
 	}

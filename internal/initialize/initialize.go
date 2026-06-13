@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/markcontrolplane"
 
@@ -113,6 +114,15 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	}
 	logf("marked control-plane node")
 
+	adminCfg, err := clientcmd.LoadFromFile(l.AdminKubeconfig)
+	if err != nil {
+		return fmt.Errorf("load admin kubeconfig: %w", err)
+	}
+	if err := kubeadm.EnsureJoinPrereqs(cfg, client, adminCfg); err != nil {
+		return fmt.Errorf("join prereqs: %w", err)
+	}
+	logf("ensured join prerequisites (kubeadm-config, cluster-info, TLS-bootstrap RBAC)")
+
 	if err := kubeadm.EnsureAddons(cfg, client, out); err != nil {
 		return fmt.Errorf("addons: %w", err)
 	}
@@ -145,6 +155,7 @@ func writeFirstBootState(l layout.Layout, selfVersion string, isOSTree bool) err
 		Version:      selfVersion,
 		DeploymentID: deploymentID,
 		BootID:       bootID,
+		Role:         state.RoleControlPlane,
 	}); err != nil {
 		return err
 	}
