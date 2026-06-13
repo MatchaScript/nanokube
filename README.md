@@ -65,5 +65,66 @@ than by configuration:
 - `certificatesDir` — fixed at `/etc/kubernetes/pki`. nanokube rejects
   explicit non-matching values and overrides empty defaults.
 
-`JoinConfiguration` documents are rejected outright until multi-node
-support lands.
+`JoinConfiguration` documents are written by `nanokube add-node` rather
+than supplied by the operator; boot refuses a config whose shape does not
+match the node's recorded role.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `nanokube init` | Initialise a fresh control-plane node (run once per install) |
+| `nanokube boot` | Internal: boot lifecycle, invoked by `nanokube.service` |
+| `nanokube reset --yes` | Tear down all nanokube-managed state |
+| `nanokube healthcheck` | Report cluster component health |
+| `nanokube config print-defaults` | Emit a starter config template |
+| `nanokube kubeconfig` | Manage kubeconfigs |
+| `nanokube token create` | Mint a bootstrap token and print joining credentials |
+| `nanokube add-node` | Join this node to an existing cluster as a worker |
+| `nanokube version` | Print version |
+
+### Adding a worker node
+
+On a control-plane node, mint a bootstrap token:
+
+```
+nanokube token create
+```
+
+The output includes the token and CA pin. On the joining node (fresh bootc
+image, `nanokube.service` not yet enabled), run:
+
+```
+nanokube add-node --server https://<cp>:6443 --token <t> --ca-cert-hash sha256:<h>
+systemctl enable nanokube.service
+```
+
+`add-node` uses kubeadm token discovery to fetch the cluster config from
+the control plane, writes it as a `JoinConfiguration`-shaped
+`/etc/nanokube/config.yaml`, marks the node's role as `worker`, then
+issues a blocking `systemctl restart nanokube.service`. The restart
+returns only after `nanokube.service` signals `READY=1`, which happens once
+the kubelet passes its healthz check, TLS-bootstrap completes, and the
+node reports Ready.
+
+The token TTL defaults to 24 hours and can be overridden with
+`--ttl` (e.g. `nanokube token create --ttl 1h`).
+
+The cluster's CNI must already be deployed; a worker node cannot reach
+Ready without a functioning overlay network. The cluster-info ConfigMap and
+TLS-bootstrap RBAC are set up automatically on any cluster initialised or
+booted by this nanokube version.
+
+#### Failed join recovery
+
+A failed join leaves `nanokube.service` in failed state (`Restart=no`).
+Rebooting the node in that state causes greenboot's `required.d` check to
+fail; once the boot counter is exhausted, bootc rolls back and the restore
+marker fires. On a fresh worker the restore is a no-op, but the restart
+loop is wasteful. The correct recovery path is:
+
+```
+nanokube reset --yes
+```
+
+Then mint a fresh token on the control plane and re-run `add-node`.
