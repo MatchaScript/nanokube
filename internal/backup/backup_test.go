@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -309,7 +310,7 @@ func TestReadMeta_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != in {
+	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round trip lost data: got %+v, want %+v", out, in)
 	}
 }
