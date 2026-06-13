@@ -35,6 +35,7 @@ import (
 	"github.com/MatchaScript/nanokube/internal/backup"
 	"github.com/MatchaScript/nanokube/internal/certs"
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
+	"github.com/MatchaScript/nanokube/internal/hosts"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
 	"github.com/MatchaScript/nanokube/internal/layout"
@@ -69,6 +70,10 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	}
 	if err := preflight.Run(ctx, checks...); err != nil {
 		return fmt.Errorf("preflight: %w", err)
+	}
+
+	if err := hosts.EnsureEntry(cfg.ControlPlaneEndpoint, cfg.LocalAPIEndpoint.AdvertiseAddress, logf); err != nil {
+		return fmt.Errorf("ensure controlPlaneEndpoint resolvable: %w", err)
 	}
 
 	if err := certs.Init(cfg, l); err != nil {
