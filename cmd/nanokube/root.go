@@ -40,6 +40,7 @@ func newRootCmdWithOpts(opts *globalOpts) *cobra.Command {
 		newConfigCmd(opts),
 		newKubeconfigCmd(opts),
 		newTokenCmd(opts),
+		newAddNodeCmd(opts),
 		newVersionCmd(),
 	)
 	return cmd
