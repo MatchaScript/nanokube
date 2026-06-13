@@ -54,13 +54,17 @@ package boot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
@@ -68,6 +72,7 @@ import (
 
 	"github.com/MatchaScript/nanokube/internal/backup"
 	"github.com/MatchaScript/nanokube/internal/certs"
+	"github.com/MatchaScript/nanokube/internal/config"
 	"github.com/MatchaScript/nanokube/internal/healthcheck"
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
 	"github.com/MatchaScript/nanokube/internal/kubeclient"
@@ -86,7 +91,8 @@ import (
 // only; super-admin.conf has been deleted by then and any operator who
 // regenerated it via `nanokube kubeconfig super-admin` is responsible
 // for cleaning it up themselves.
-func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout, selfVersion string, out io.Writer) error {
+func Run(ctx context.Context, loaded *config.Loaded, l layout.Layout, selfVersion string, out io.Writer) error {
+	cfg := loaded.Init
 	logf := func(format string, a ...any) { fmt.Fprintf(out, "[nanokube] "+format+"\n", a...) }
 	nodeName := cfg.NodeRegistration.Name
 
@@ -103,7 +109,6 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	}
 	checks := []preflight.Preflighter{
 		preflight.FSWritable{Dirs: []string{l.NanoKubeVarDir, l.KubernetesDir}},
-		certs.CAExistPreflighter{Layout: l}, // CR9: gate Ensure on CA presence
 	}
 	if isOSTree {
 		checks = append(checks, backup.SpacePreflighter{Layout: l})
@@ -139,9 +144,24 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		}
 	}
 
+	// Fail-closed role gate. Reads AFTER maybeRestore on purpose: a
+	// rollback boot's restore reconstructs last-boot.json from the backup
+	// meta, so prev reflects the restored state for both the gates and
+	// the snapshot naming below. last-boot.json is the AUTHORITY for the
+	// role branch — a node with no record is not initialised or joined;
+	// refuse rather than guess. The gates also run before the
+	// control-plane-only CA preflight, which would otherwise fail first
+	// on a worker that legitimately carries no full PKI.
 	prev, hadPrev, err := state.ReadLastBoot(l)
 	if err != nil {
 		return err
+	}
+	if !hadPrev {
+		return fmt.Errorf("no last-boot state at %s: node is not initialised or joined; run `nanokube init` or `nanokube add-node` first", l.LastBootFile)
+	}
+	role := prev.RoleOrDefault()
+	if (role == state.RoleWorker) != loaded.HasJoin {
+		return fmt.Errorf("role %q in %s does not match config shape (JoinConfiguration present: %v); refusing to boot", role, l.LastBootFile, loaded.HasJoin)
 	}
 
 	// Snapshot the data the previous successful boot left on disk, named
@@ -157,7 +177,7 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	// binary cannot run. Skipping is the correct behaviour — operators
 	// who want a pre-rebase snapshot must take it before `rpm-ostree
 	// rebase`.
-	if useBackups && hadPrev && prev.BootID != "" && prev.BootID != currentBoot {
+	if useBackups && prev.BootID != "" && prev.BootID != currentBoot {
 		switch {
 		case prev.DeploymentID == "" || prev.DeploymentID != currentDeployment:
 			logf("skipping snapshot: prev deployment %s != current %s (likely ostree rebase)",
@@ -172,15 +192,24 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		}
 	}
 
-	upgrading := hadPrev && prev.Version != selfVersion
+	upgrading := prev.Version != selfVersion
 	switch {
-	case !hadPrev:
-		logf("first healthy boot pending (version=%s)", selfVersion)
 	case upgrading:
 		logf("upgrade path: %s -> %s", prev.Version, selfVersion)
 		_ = state.WriteLastEvent(l, fmt.Sprintf("upgrading %s -> %s", prev.Version, selfVersion))
 	default:
 		logf("reconcile path (version=%s)", selfVersion)
+	}
+
+	if role == state.RoleWorker {
+		return runWorker(ctx, cfg, l, prev, currentDeployment, currentBoot, upgrading, selfVersion, logf)
+	}
+
+	// Control-plane-only CA preflight (CR9): gate Ensure on CA presence.
+	// Moved here from the shared check slice — a worker carries no full
+	// PKI and the worker branch above has already returned.
+	if err := preflight.Run(ctx, certs.CAExistPreflighter{Layout: l}); err != nil {
+		return fmt.Errorf("preflight: %w", err)
 	}
 
 	if err := kubeadm.Ensure(cfg, l); err != nil {
@@ -266,17 +295,14 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 		Version:       selfVersion,
 		DeploymentID:  currentDeployment,
 		BootID:        currentBoot,
-		Role:          prev.RoleOrDefault(),
+		Role:          role,
 		APIServerURLs: prev.APIServerURLs,
 	}); err != nil {
 		logf("write last-boot failed (continuing): %v", err)
 	}
-	switch {
-	case upgrading:
+	if upgrading {
 		_ = state.WriteLastEvent(l, fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
-	case !hadPrev:
-		_ = state.WriteLastEvent(l, fmt.Sprintf("initialised at %s", selfVersion))
-	default:
+	} else {
 		_ = state.WriteLastEvent(l, fmt.Sprintf("healthy at %s", selfVersion))
 	}
 	// Cluster is verified healthy. Notify systemd READY=1 so a blocking
@@ -291,6 +317,119 @@ func Run(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout
 	notifyReady(logf)
 	logf("boot complete")
 	return nil
+}
+
+// workerNodeReadyTimeout is generous: a joining worker must pull and
+// roll out the cluster's CNI DaemonSet before it can report Ready
+// (joining a CNI-less cluster is unsupported, so this is bounded).
+const workerNodeReadyTimeout = 5 * time.Minute
+
+const kubeletHealthzTimeout = 2 * time.Minute
+
+// runWorker is the worker reconcile: render kubelet files, start
+// kubelet, then gate on kubeadm join's own three stages — kubelet
+// healthz, kubelet.conf usable (TLS bootstrap done), own Node Ready
+// using kubelet.conf credentials (the node authorizer guarantees a node
+// can read its own Node object; workers carry no admin.conf).
+func runWorker(ctx context.Context, cfg *kubeadmapi.InitConfiguration, l layout.Layout, prev state.LastBoot, currentDeployment, currentBoot string, upgrading bool, selfVersion string, logf func(string, ...any)) error {
+	fail := func(cause error) error {
+		return bootFailed(l, upgrading, prev.Version, selfVersion, cause)
+	}
+	if _, err := os.Stat(filepath.Join(l.PKIDir, "ca.crt")); err != nil {
+		return fail(fmt.Errorf("cluster CA cert: %w (re-run `nanokube add-node`)", err))
+	}
+
+	if err := kubeadm.EnsureWorker(cfg, l); err != nil {
+		return fail(fmt.Errorf("ensure worker: %w", err))
+	}
+	if changed, err := kubeadm.FinalizeKubeletKubeconfig(l); err != nil {
+		return fail(fmt.Errorf("finalize kubelet.conf: %w", err))
+	} else if changed {
+		logf("kubelet.conf repointed at kubelet-client-current.pem")
+	}
+	if err := startKubelet(ctx, logf); err != nil {
+		return fail(err)
+	}
+
+	if err := waitKubeletHealthz(ctx, logf); err != nil {
+		return fail(err)
+	}
+	client, err := waitKubeletConf(ctx, l, logf)
+	if err != nil {
+		return fail(err)
+	}
+	nodeName := cfg.NodeRegistration.Name
+	wctx, cancel := context.WithTimeout(ctx, workerNodeReadyTimeout)
+	defer cancel()
+	logf("waiting for node Ready (timeout=%s)", workerNodeReadyTimeout)
+	if err := healthcheck.WaitForWorker(wctx, client, nodeName); err != nil {
+		return fail(err)
+	}
+
+	// TLS bootstrap is complete; the bootstrap credential must not
+	// linger (same posture as super-admin.conf deletion).
+	if err := os.Remove(l.BootstrapKubeletKubeconfig); err == nil {
+		logf("removed bootstrap-kubelet.conf")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fail(fmt.Errorf("remove bootstrap-kubelet.conf: %w", err))
+	}
+
+	if err := state.WriteLastBoot(l, state.LastBoot{
+		Version:       selfVersion,
+		DeploymentID:  currentDeployment,
+		BootID:        currentBoot,
+		Role:          state.RoleWorker,
+		APIServerURLs: prev.APIServerURLs,
+	}); err != nil {
+		logf("write last-boot failed (continuing): %v", err)
+	}
+	if upgrading {
+		_ = state.WriteLastEvent(l, fmt.Sprintf("upgraded %s -> %s", prev.Version, selfVersion))
+	} else {
+		_ = state.WriteLastEvent(l, fmt.Sprintf("healthy at %s", selfVersion))
+	}
+	notifyReady(logf)
+	logf("worker boot complete")
+	return nil
+}
+
+// waitKubeletHealthz polls the kubelet's local healthz endpoint —
+// kubeadm join stage 1. 10248 is the kubelet default; nanokube does not
+// override healthzBindAddress/Port in the configs it renders.
+func waitKubeletHealthz(ctx context.Context, logf func(string, ...any)) error {
+	logf("waiting for kubelet healthz (timeout=%s)", kubeletHealthzTimeout)
+	cctx, cancel := context.WithTimeout(ctx, kubeletHealthzTimeout)
+	defer cancel()
+	return wait.PollUntilContextCancel(cctx, time.Second, true, func(context.Context) (bool, error) {
+		resp, err := http.Get("http://127.0.0.1:10248/healthz")
+		if err != nil {
+			return false, nil
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK, nil
+	})
+}
+
+// waitKubeletConf waits until kubelet.conf exists and yields a working
+// client — kubeadm join stage 2 (TLS bootstrap completed). The timeout
+// matches kubeadm's TLS bootstrap budget.
+func waitKubeletConf(ctx context.Context, l layout.Layout, logf func(string, ...any)) (kubernetes.Interface, error) {
+	logf("waiting for kubelet TLS bootstrap (kubelet.conf, timeout=5m)")
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	var client kubernetes.Interface
+	err := wait.PollUntilContextCancel(cctx, time.Second, true, func(context.Context) (bool, error) {
+		c, err := kubeclient.LoadAdmin(l.KubeletKubeconfig)
+		if err != nil {
+			return false, nil
+		}
+		client = c
+		return true, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kubelet TLS bootstrap did not complete: %w (check the bootstrap token TTL and the cluster's CSR approvals)", err)
+	}
+	return client, nil
 }
 
 // maybeRestore consumes the greenboot-placed restore marker. If a

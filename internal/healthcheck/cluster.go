@@ -37,6 +37,20 @@ func WaitForControlPlane(ctx context.Context, client kubernetes.Interface, nodeN
 	return waitAllReady(ctx, checks)
 }
 
+// WaitForWorker polls until Node <nodeName> reports Ready=True. A worker
+// runs no control-plane static pods, so the named Node's readiness — set
+// only once the CNI is up and the node authorizer admits the kubelet's
+// self-status updates — is the complete join health signal. Returns nil
+// when the node is Ready; returns ctx.Err() (wrapped) on timeout.
+// Requires an authenticated client (kubelet.conf credentials suffice:
+// the node authorizer lets a node read its own Node object).
+func WaitForWorker(ctx context.Context, client kubernetes.Interface, nodeName string) error {
+	checks := []readyCheck{
+		{name: fmt.Sprintf("node/%s", nodeName), fn: func(ctx context.Context) bool { return nodeReady(ctx, client, nodeName) }},
+	}
+	return waitAllReady(ctx, checks)
+}
+
 type readyCheck struct {
 	name string
 	fn   func(context.Context) bool

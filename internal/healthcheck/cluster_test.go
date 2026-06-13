@@ -57,6 +57,34 @@ func TestWaitForControlPlane_NodeNotReadyTimesOut(t *testing.T) {
 	}
 }
 
+// WaitForWorker gates on the named Node's Ready condition alone — no
+// control-plane static pods exist on a worker.
+func TestWaitForWorker_NodeReadyReturns(t *testing.T) {
+	f := newFakeAPIServer(t)
+	const node = "worker-1"
+	f.setNodeReady(node, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := WaitForWorker(ctx, f.client, node); err != nil {
+		t.Fatalf("WaitForWorker: %v", err)
+	}
+}
+
+// Node never reaches Ready (CNI DaemonSet not yet rolled out): the wait
+// must block until the context deadline.
+func TestWaitForWorker_NodeNotReadyTimesOut(t *testing.T) {
+	f := newFakeAPIServer(t)
+	const node = "worker-1"
+	f.setNodeReady(node, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	if err := WaitForWorker(ctx, f.client, node); err == nil {
+		t.Fatal("WaitForWorker with NodeReady=False = nil; want timeout")
+	}
+}
+
 // Pod becomes Ready partway through — must be picked up without the
 // caller needing to re-invoke.
 func TestWaitForControlPlane_EventuallyReadyPasses(t *testing.T) {

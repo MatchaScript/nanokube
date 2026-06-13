@@ -25,16 +25,17 @@ type Layout struct {
 	RestoreMarker  string
 
 	// Kubernetes (KubernetesDir is also the kubeconfig directory)
-	KubernetesDir         string // /etc/kubernetes
-	PKIDir                string // /etc/kubernetes/pki
-	EtcdPKIDir            string // /etc/kubernetes/pki/etcd
-	ManifestsDir          string // /etc/kubernetes/manifests
-	KubeAPIServerManifest string
-	AdminKubeconfig       string
-	KubeletKubeconfig     string
-	CMKubeconfig          string
-	SchedKubeconfig       string
-	SuperAdminKubeconfig  string
+	KubernetesDir              string // /etc/kubernetes
+	PKIDir                     string // /etc/kubernetes/pki
+	EtcdPKIDir                 string // /etc/kubernetes/pki/etcd
+	ManifestsDir               string // /etc/kubernetes/manifests
+	KubeAPIServerManifest      string
+	AdminKubeconfig            string
+	KubeletKubeconfig          string
+	BootstrapKubeletKubeconfig string // /etc/kubernetes/bootstrap-kubelet.conf
+	CMKubeconfig               string
+	SchedKubeconfig            string
+	SuperAdminKubeconfig       string
 
 	// Kubelet
 	KubeletDir          string // /var/lib/kubelet
@@ -71,16 +72,17 @@ func Default() Layout {
 		BackupsDir:     backups,
 		RestoreMarker:  backups + "/restore",
 
-		KubernetesDir:         kdir,
-		PKIDir:                pki,
-		EtcdPKIDir:            etcd,
-		ManifestsDir:          mfs,
-		KubeAPIServerManifest: mfs + "/kube-apiserver.yaml",
-		AdminKubeconfig:       kdir + "/admin.conf",
-		KubeletKubeconfig:     kdir + "/kubelet.conf",
-		CMKubeconfig:          kdir + "/controller-manager.conf",
-		SchedKubeconfig:       kdir + "/scheduler.conf",
-		SuperAdminKubeconfig:  kdir + "/super-admin.conf",
+		KubernetesDir:              kdir,
+		PKIDir:                     pki,
+		EtcdPKIDir:                 etcd,
+		ManifestsDir:               mfs,
+		KubeAPIServerManifest:      mfs + "/kube-apiserver.yaml",
+		AdminKubeconfig:            kdir + "/admin.conf",
+		KubeletKubeconfig:          kdir + "/kubelet.conf",
+		BootstrapKubeletKubeconfig: kdir + "/bootstrap-kubelet.conf",
+		CMKubeconfig:               kdir + "/controller-manager.conf",
+		SchedKubeconfig:            kdir + "/scheduler.conf",
+		SuperAdminKubeconfig:       kdir + "/super-admin.conf",
 
 		KubeletDir:          kubelet,
 		KubeletConfigFile:   kubelet + "/config.yaml",

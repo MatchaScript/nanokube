@@ -16,10 +16,12 @@ After=crio.service network-online.target
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/nanokube boot
-# Boot is verified end-to-end (Ensure -> kubelet -> /readyz ->
-# control-plane Ready) before READY=1 fires, and edge hardware can be
-# slow; allow a generous margin before systemd kills us.
-TimeoutStartSec=10m
+# Boot is verified end-to-end before READY=1 fires, and edge hardware can
+# be slow; allow a generous margin before systemd kills us. The worker
+# path's worst case dominates: kubelet healthz 2m + TLS bootstrap 5m +
+# node Ready 5m, and `systemctl restart nanokube.service` from add-node
+# relies on Type=notify blocking until READY=1.
+TimeoutStartSec=15m
 # Healthy boot leaves nanokube parked on SIGTERM so the unit stays
 # Active(running). Restart on unexpected exit would mask greenboot
 # failure detection — non-zero exits propagate to greenboot's

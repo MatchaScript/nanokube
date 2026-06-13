@@ -139,8 +139,13 @@ func Create(stagingDir, finalDir string, meta state.LastBoot, l layout.Layout) e
 		return fmt.Errorf("stat %s: %w", finalDir, err)
 	}
 
-	if err := copyDirIfExists(l.EtcdDataDir, filepath.Join(stagingDir, "etcd")); err != nil {
-		return fmt.Errorf("copy etcd: %w", err)
+	// A worker has no etcd member; its backups must never carry an etcd
+	// tree (and HA control planes will later opt out too — they recover
+	// by resync, not restore).
+	if meta.RoleOrDefault() == state.RoleControlPlane {
+		if err := copyDirIfExists(l.EtcdDataDir, filepath.Join(stagingDir, "etcd")); err != nil {
+			return fmt.Errorf("copy etcd: %w", err)
+		}
 	}
 	if err := copyDirIfExists(l.KubernetesDir, filepath.Join(stagingDir, "kubernetes")); err != nil {
 		return fmt.Errorf("copy kubernetes: %w", err)
@@ -188,8 +193,18 @@ func Restore(l layout.Layout, name string) error {
 		return fmt.Errorf("stat backup %s: %w", name, err)
 	}
 
-	if err := restoreDir(filepath.Join(src, "etcd"), l.EtcdDataDir); err != nil {
-		return fmt.Errorf("restore etcd: %w", err)
+	// Only restore etcd when the backup actually carries it. Absence
+	// means the role never had an etcd member (Create is role-gated), NOT
+	// "etcd should be deleted" — so skip rather than let restoreDir
+	// RemoveAll the live tree. A control-plane backup always contains
+	// etcd/ and takes the normal restore path.
+	etcdSrc := filepath.Join(src, "etcd")
+	if _, err := os.Stat(etcdSrc); err == nil {
+		if err := restoreDir(etcdSrc, l.EtcdDataDir); err != nil {
+			return fmt.Errorf("restore etcd: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat backup etcd: %w", err)
 	}
 	if err := restoreDir(filepath.Join(src, "kubernetes"), l.KubernetesDir); err != nil {
 		return fmt.Errorf("restore kubernetes: %w", err)

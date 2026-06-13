@@ -258,35 +258,39 @@ func TestRestore_SwapsInBackupContents(t *testing.T) {
 	}
 }
 
-func TestRestore_MissingEtcdInBackupWipesLiveEtcd(t *testing.T) {
+// A worker backup carries no etcd/ tree (Create is role-gated). Restoring
+// it must leave the live etcd dir untouched rather than wiping it: absence
+// means the role never had etcd, not "delete etcd".
+func TestCreate_WorkerOmitsEtcd_RestorePreservesLiveEtcd(t *testing.T) {
 	requireCp(t)
 	l := layouttest.New(t)
+	seedLiveState(t, l)
 
-	// Seed a backup that deliberately lacks the etcd subtree (mimics a
-	// first-boot snapshot where etcd had not yet initialised).
-	meta := state.LastBoot{Version: "v1", DeploymentID: "d", BootID: "b"}
-	backupDir := filepath.Join(l.BackupsDir, Name(meta))
-	if err := os.MkdirAll(backupDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(backupDir, "meta.json"), []byte(`{"version":"v1","deploymentId":"d","bootId":"b"}`), 0o600); err != nil {
-		t.Fatal(err)
+	meta := state.LastBoot{Version: "v1", DeploymentID: "d", BootID: "b", Role: state.RoleWorker}
+	if err := Create(newStaging(t, l), finalDir(l, meta), meta, l); err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 
-	// Live etcd has content from a newer boot that must be wiped.
-	if err := os.MkdirAll(l.EtcdDataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(l.EtcdDataDir, "junk"), []byte("junk"), 0o600); err != nil {
-		t.Fatal(err)
+	// The worker backup must not contain an etcd subtree even though the
+	// live etcd dir was seeded.
+	if _, err := os.Stat(filepath.Join(finalDir(l, meta), "etcd")); !os.IsNotExist(err) {
+		t.Fatalf("worker backup contains etcd/: err=%v", err)
 	}
 
+	// A newer boot left content in live etcd; restoring the worker backup
+	// must not touch it.
+	if err := os.WriteFile(filepath.Join(l.EtcdDataDir, "member"), []byte("LIVE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := Restore(l, Name(meta)); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-
-	if _, err := os.Stat(l.EtcdDataDir); !os.IsNotExist(err) {
-		t.Errorf("live etcd dir survived restore: err=%v", err)
+	got, err := os.ReadFile(filepath.Join(l.EtcdDataDir, "member"))
+	if err != nil {
+		t.Fatalf("live etcd member gone after restore: %v", err)
+	}
+	if string(got) != "LIVE" {
+		t.Errorf("live etcd member = %q; want LIVE (restore must not touch etcd absent from backup)", string(got))
 	}
 }
 

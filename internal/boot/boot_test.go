@@ -1,6 +1,7 @@
 package boot
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -16,10 +17,44 @@ import (
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	"github.com/MatchaScript/nanokube/internal/certs"
+	"github.com/MatchaScript/nanokube/internal/config"
 	"github.com/MatchaScript/nanokube/internal/layout"
 	"github.com/MatchaScript/nanokube/internal/layouttest"
 	"github.com/MatchaScript/nanokube/internal/state"
 )
+
+// defaultedLoaded builds a *config.Loaded with a defaulted control-plane
+// InitConfiguration and HasJoin=false (the init shape). Worker-role
+// fixtures flip HasJoin at the call site.
+func defaultedLoaded(t *testing.T) *config.Loaded {
+	t.Helper()
+	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
+	}
+	return &config.Loaded{Init: cfg}
+}
+
+func TestRun_FailsClosedWithoutLastBoot(t *testing.T) {
+	l := layouttest.New(t)
+	loaded := defaultedLoaded(t)
+	err := Run(context.Background(), loaded, l, "v1.35.0", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "add-node") {
+		t.Fatalf("want fail-closed error mentioning add-node, got %v", err)
+	}
+}
+
+func TestRun_FailsOnRoleShapeMismatch(t *testing.T) {
+	l := layouttest.New(t)
+	if err := state.WriteLastBoot(l, state.LastBoot{Version: "v", Role: state.RoleWorker}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := defaultedLoaded(t) // HasJoin == false → mismatch with worker role
+	err := Run(context.Background(), loaded, l, "v1.35.0", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "role") {
+		t.Fatalf("want role/shape mismatch error, got %v", err)
+	}
+}
 
 func TestShortID(t *testing.T) {
 	cases := []struct {
