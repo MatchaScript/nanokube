@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestReadLastBoot_MissingFileIsNotAnError(t *testing.T) {
 	if had {
 		t.Errorf("had = true on empty state")
 	}
-	if lb != (LastBoot{}) {
+	if !reflect.DeepEqual(lb, (LastBoot{})) {
 		t.Errorf("LastBoot = %+v; want zero value", lb)
 	}
 }
@@ -40,7 +41,7 @@ func TestWriteLastBoot_RoundTripPreservesFields(t *testing.T) {
 	if err != nil || !had {
 		t.Fatalf("ReadLastBoot: err=%v had=%v", err, had)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip: got %+v, want %+v", got, want)
 	}
 }
@@ -131,6 +132,42 @@ func TestReadLastEvent_EmptyWhenAbsent(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("ReadLastEvent on empty state = %q; want empty", got)
+	}
+}
+
+func TestLastBoot_RoleRoundTripAndLegacyDefault(t *testing.T) {
+	l := layouttest.New(t)
+
+	want := LastBoot{
+		Version:       "v1.35.0",
+		Role:          RoleWorker,
+		APIServerURLs: []string{"https://10.0.2.10:6443"},
+	}
+	if err := WriteLastBoot(l, want); err != nil {
+		t.Fatalf("WriteLastBoot: %v", err)
+	}
+	got, had, err := ReadLastBoot(l)
+	if err != nil || !had {
+		t.Fatalf("ReadLastBoot: err=%v had=%v", err, had)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip: got %+v, want %+v", got, want)
+	}
+	if got.RoleOrDefault() != RoleWorker {
+		t.Errorf("RoleOrDefault: got %q, want %q", got.RoleOrDefault(), RoleWorker)
+	}
+
+	// A record written before the multinode work has no role field and
+	// is by definition the SNO control plane.
+	if err := os.WriteFile(l.LastBootFile, []byte(`{"version":"v1.34.0"}`), 0o644); err != nil {
+		t.Fatalf("write legacy record: %v", err)
+	}
+	legacy, _, err := ReadLastBoot(l)
+	if err != nil {
+		t.Fatalf("ReadLastBoot legacy: %v", err)
+	}
+	if legacy.RoleOrDefault() != RoleControlPlane {
+		t.Errorf("legacy RoleOrDefault: got %q, want %q", legacy.RoleOrDefault(), RoleControlPlane)
 	}
 }
 

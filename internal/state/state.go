@@ -27,12 +27,41 @@ import (
 	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
+// Role is the node's durable identity, written once by `nanokube init`
+// (control-plane) or `nanokube add-node` (worker) and preserved by every
+// subsequent healthy-boot write. It is the AUTHORITY for Boot's
+// role branch — Boot never infers role from on-disk artifacts or by
+// querying the cluster.
+type Role string
+
+const (
+	RoleControlPlane Role = "control-plane"
+	RoleWorker       Role = "worker"
+)
+
 // LastBoot is the metadata persisted after a healthy boot. DeploymentID
 // is empty on non-ostree systems where no bootc deployment exists.
+// APIServerURLs is a nanokube-internal cache of the control-plane
+// nodes' real apiserver URLs (NOT the cluster's stable
+// controlPlaneEndpoint — that lives in ClusterConfiguration and is what
+// kubelet.conf points at). nanokube alone consumes this list, to find
+// the cluster below the stable-endpoint machinery.
 type LastBoot struct {
-	Version      string `json:"version"`
-	DeploymentID string `json:"deploymentId,omitempty"`
-	BootID       string `json:"bootId,omitempty"`
+	Version       string   `json:"version"`
+	DeploymentID  string   `json:"deploymentId,omitempty"`
+	BootID        string   `json:"bootId,omitempty"`
+	Role          Role     `json:"role,omitempty"`
+	APIServerURLs []string `json:"apiServerURLs,omitempty"`
+}
+
+// RoleOrDefault returns the recorded role. Records written before the
+// multinode work carry no role field; those are by definition the SNO
+// control plane (one-time back-compat).
+func (lb LastBoot) RoleOrDefault() Role {
+	if lb.Role == "" {
+		return RoleControlPlane
+	}
+	return lb.Role
 }
 
 // ReadLastBoot returns the persisted metadata. The bool is false when no
