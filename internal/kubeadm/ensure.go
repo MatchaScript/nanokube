@@ -53,10 +53,28 @@ func Ensure(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
 		return fmt.Errorf("create control plane manifests: %w", err)
 	}
 
-	// kubelet phase: ordering mirrors kubeadm's init kubelet-start.
-	// WriteConfigToDisk reads the instance file as a patch when the
-	// NodeLocalCRISocket feature gate is on (GA+locked as of k8s v1.36),
-	// so the instance file must be written first.
+	return ensureKubeletFiles(cfg, l)
+}
+
+// EnsureWorker renders only what a worker needs on every boot: the
+// kubelet env file, instance config, and kubelet config. No static
+// pods, no etcd — a worker's control plane is remote.
+func EnsureWorker(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
+	if err := os.MkdirAll(l.KubeletDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", l.KubeletDir, err)
+	}
+	own := *cfg
+	own.CertificatesDir = l.PKIDir
+	return ensureKubeletFiles(&own, l)
+}
+
+// ensureKubeletFiles writes the three kubelet config artifacts in the
+// order kubeadm requires: env file → instance config → main config.
+// WriteConfigToDisk reads the instance file as a patch when the
+// NodeLocalCRISocket feature gate is on (GA+locked as of k8s v1.36),
+// so the instance file must be written first.
+func ensureKubeletFiles(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
+	const patchesDir = ""
 	if err := kubelet.WriteKubeletDynamicEnvFile(&cfg.ClusterConfiguration, &cfg.NodeRegistration, false, l.KubeletDir); err != nil {
 		return fmt.Errorf("write kubelet env file: %w", err)
 	}
@@ -69,6 +87,5 @@ func Ensure(cfg *kubeadmapi.InitConfiguration, l layout.Layout) error {
 	if err := kubelet.WriteConfigToDisk(&cfg.ClusterConfiguration, l.KubeletDir, patchesDir, os.Stderr); err != nil {
 		return fmt.Errorf("write kubelet config: %w", err)
 	}
-
 	return nil
 }
