@@ -13,7 +13,7 @@
 # state.
 set -euo pipefail
 
-STATE_DIR="/var/tmp/nanokube-devenv"
+STATE_DIR="${STATE_DIR:-/var/tmp/nanokube-devenv}"
 DISK="${STATE_DIR}/output/qcow2/disk.qcow2"
 SSH_PORT="${SSH_PORT:-2222}"
 AGENT_PORT="${AGENT_PORT:-9090}"
