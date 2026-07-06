@@ -74,6 +74,50 @@ separate kickstart/ignition layer, out of scope here):
   content, is part of the committed image). Without this fix the SSH key
   would silently vanish on first boot and the VM would be unreachable.
 
+### nanokube-agent (baked in, 2026-07-06)
+
+The real `nanokube-agent` release binary is baked into the image and started
+by an enabled systemd unit -- this is Step 1 item 1's residual work, not
+devenv provisioning glue:
+
+- `build-image.sh` builds `agent/` in release mode on the host (`cargo build
+  --release --manifest-path agent/Cargo.toml`) before the `podman build`
+  step, and copies the resulting binary into `image/bin/nanokube-agent`
+  (gitignored, matches the existing root `.gitignore`'s `bin/` pattern) so
+  the Containerfile can `COPY` it in. No Rust builder stage was added to the
+  Containerfile itself -- host and guest are both Fedora 44/glibc
+  2.43/x86_64 (confirmed via `ldd --version`/`/etc/os-release` on both
+  sides), so a plain host-built binary runs on the guest unmodified, and
+  this avoids adding a second toolchain-carrying build stage for no benefit.
+  `protoc` (needed by the agent's build script) is deliberately *not*
+  installed via `dnf` on the host -- this host is itself a bootc system
+  whose own OS state must not be touched by this devenv -- so
+  `build-image.sh` fetches a pinned static `protoc` release into
+  `/var/tmp/nanokube-devenv/tools/protoc/` (disposable state) instead, if
+  one isn't already on `PATH`.
+- The binary lands at `/usr/local/bin/nanokube-agent`; the unit is
+  `image/overlay/usr/lib/systemd/system/nanokube-agent.service`, `systemctl
+  enable`'d alongside the image's other units. It runs `nanokube-agent serve
+  --listen 0.0.0.0:9090 --confexts-dir /var/lib/confexts --bookkeeping-path
+  /var/lib/nanokube/state/agent-bookkeeping.json` (matching
+  `agent/src/main.rs`'s own defaults -- spelled out explicitly in the unit
+  for self-documentation). No tmpfiles.d entries were needed for those `/var`
+  paths: `RealOps::place`/`atomic_write` already `create_dir_all` them on
+  first use.
+- `boot-vm.sh` forwards the agent's gRPC port permanently now:
+  `hostfwd=tcp::${AGENT_PORT}-:9090` (default `AGENT_PORT=9090`) alongside
+  the existing SSH forward, so `127.0.0.1:9090` on the host always reaches
+  the guest agent for any VM booted with this script -- no more live
+  monitor-socket `hostfwd_add` needed after a fresh boot.
+
+**Rebuilding while a VM is running**: `build-image.sh`'s `bootc-image-builder`
+step writes a brand-new `output/qcow2/disk.qcow2` at the *same path* a
+running VM has open as its backing disk. Doing so while `boot-vm.sh`'s qemu
+process is still up corrupts the live guest's filesystem (confirmed
+2026-07-06 -- see below). `build-image.sh` now refuses to run if
+`qemu.pid` names a live process; stop the VM first (see "Stopping the VM"),
+rebuild, then `boot-vm.sh` again.
+
 ## Usage
 
 ```
@@ -144,6 +188,64 @@ change).
 Not exercised here (explicitly out of scope per the task): an actual reboot
 into a switched/upgraded deployment. Step 1 verification only needs confext
 placement and bootc *staging*, not a reboot cycle.
+
+## Verified on this VM (2026-07-06): agent baked in, reboot, Kind reachability
+
+Step 1 item 1's residual work: bake `nanokube-agent` into the image, prove
+Kind (podman container) -> agent (qemu guest) gRPC reachability.
+
+**Incident, contained**: the first `build-image.sh` run of the day executed
+while the 2026-07-05 VM was still running. `bootc-image-builder` writes a
+fresh `output/qcow2/disk.qcow2` at the same path that VM's qemu process had
+open as its live backing disk; the concurrent writes corrupted it (`ext4`
+journal aborted mid-boot, filesystem remounted read-only, `qemu-img check`
+reported dozens of unrecoverable refcount errors). Per this task's own
+"everything here is disposable" rule: the corrupted VM was killed and
+discarded, the image was rebuilt clean (`qemu-img check` afterward: "No
+errors were found"), and a fresh VM was booted from it. `build-image.sh` now
+refuses to run while `qemu.pid` names a live process, so this can't
+recur silently.
+
+- Fresh VM booted from the rebuilt image; `bootc status` showed the
+  expected first-boot quirk (booted image `localhost:5000/...`); reapplied
+  `sudo bootc switch --transport registry 10.0.2.2:5000/nanokube-devenv:latest`,
+  staged correctly, then `sudo systemctl reboot`'d for real (the
+  2026-07-05 entry above didn't exercise this). Post-reboot `bootc status`
+  confirms booted image `10.0.2.2:5000/nanokube-devenv:latest`, with the
+  prior `localhost:5000/...` deployment retained as `rollback`.
+- `systemctl status nanokube-agent` post-reboot: `active (running)`,
+  listening on `0.0.0.0:9090`. Confirms the unit survives a real reboot, not
+  just a first boot.
+- Host reachability: `boot-vm.sh`'s new permanent hostfwd applied
+  automatically on this boot (no live monitor-socket patch needed) --
+  `ss -tlnp` on the host shows `qemu-system-x86` on `127.0.0.1:9090`, and a
+  bare TCP connect from the host succeeds.
+- A real `PushDesired` round trip (via a locally-built `grpcurl`, not
+  installed system-wide) against `127.0.0.1:9090` reached the real agent
+  process and drove its real pipeline: checksum verification passed,
+  `place` wrote the confext file under `/var/lib/confexts/`, then
+  `systemd-confext refresh --mutable=yes` correctly rejected the test
+  payload ("Failed to read metadata for image ...: Package not installed")
+  since it was arbitrary bytes, not a real confext DDI image -- stronger
+  evidence than a bare handshake, since it proves the full server-side path
+  executes for real. The stray `.raw`/`.generations` files this left under
+  `/var/lib/confexts/` were removed afterward (bookkeeping was never
+  written -- `refresh` fails before that step).
+- Registry: `curl http://127.0.0.1:5000/v2/_catalog` (host) and the
+  equivalent `http://10.0.2.2:5000/v2/_catalog` from inside the guest both
+  list `nanokube-devenv:latest`. `sudo bootc upgrade --check` on the guest
+  reports "No changes in: docker://10.0.2.2:5000/nanokube-devenv:latest",
+  confirming the guest can actually resolve and pull manifests from its own
+  view of the registry, not just reach it at the TCP level.
+- Kind -> agent reachability: `KIND_EXPERIMENTAL_PROVIDER=podman kind create
+  cluster` (no docker daemon socket on this host -- confirmed via `docker
+  info`, hence the podman provider). From a plain busybox pod on that
+  cluster, `nc -zv -w3 169.254.1.2 9090` reports `open`. `169.254.1.2` is
+  rootless podman's `pasta` networking backend's host-loopback alias (this
+  host's `podman info` confirms `rootlessNetworkCmd: pasta`) -- neither
+  `hostNetwork: true` nor the podman bridge gateway IP reach the host from
+  inside a Kind pod on this host, only this address does. The test cluster
+  and pod were deleted afterward (`kind delete cluster`).
 
 ## Runtime state (not in git)
 

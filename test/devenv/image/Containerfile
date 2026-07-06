@@ -11,6 +11,12 @@
 #   (/var/lib/kubelet/config.yaml). See overlay/usr/lib/systemd/system/
 #   kubelet.service.d/10-kubeadm.conf.
 #
+# PLUS the nanokube-agent deliverable itself (Step 1 item 1's residual work):
+#   the release binary built from agent/ (by build-image.sh, into
+#   image/bin/nanokube-agent, before this Containerfile runs) is baked in at
+#   /usr/local/bin/nanokube-agent and started by the enabled
+#   nanokube-agent.service unit (gRPC PushDesired server on :9090).
+#
 # Everything else under overlay/ (SSH access, DHCP network unit, local
 # registry trust) is devenv provisioning glue required to make a headless
 # qemu VM reachable at all -- it has no equivalent in the homelab repo
@@ -78,6 +84,13 @@ COPY --from=kubeadm-downloader /opt/bin/kubeadm /usr/bin/kubeadm
 # --- devenv-only patch: kubelet config path (see header comment) ---
 COPY overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
 
+# --- nanokube-agent: baked into the image, built by build-image.sh (host
+# `cargo build --release` from agent/, since the image itself carries no Rust
+# toolchain) into image/bin/nanokube-agent before this podman build runs. ---
+COPY bin/nanokube-agent /usr/local/bin/nanokube-agent
+RUN chmod 755 /usr/local/bin/nanokube-agent
+COPY overlay/usr/lib/systemd/system/nanokube-agent.service /usr/lib/systemd/system/nanokube-agent.service
+
 # --- devenv-only provisioning glue (not part of homelab lineage) ---
 COPY overlay/etc/systemd/network/20-wired.network /etc/systemd/network/20-wired.network
 COPY overlay/etc/containers/registries.conf.d/10-devenv-registry.conf /etc/containers/registries.conf.d/10-devenv-registry.conf
@@ -100,7 +113,8 @@ RUN systemctl enable tuned && \
     systemctl enable systemd-networkd && \
     systemctl enable systemd-resolved && \
     systemctl enable sshd && \
-    systemctl enable systemd-timesyncd
+    systemctl enable systemd-timesyncd && \
+    systemctl enable nanokube-agent
 
 RUN dnf clean all
 RUN rm /var/{log,cache,lib}/* -rf
