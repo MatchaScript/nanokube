@@ -1,0 +1,194 @@
+//! `apply --once` support: reads a `DesiredMetadata` JSON sidecar plus
+//! its sibling `<name>.raw` blob from disk, then runs the same `apply()`
+//! pipeline the gRPC server uses.
+
+use std::fmt;
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::pipeline::{ApplyError, DesiredMetadata, Ops, apply};
+
+/// Wire shape of the `<name>.json` sidecar: protojson's default camelCase
+/// output for `contract.desired.v1.DesiredMetadata` (see
+/// `contract/fixtures/*.json`).
+#[derive(Debug, Deserialize)]
+struct DesiredMetadataJson {
+    name: String,
+    #[serde(rename = "targetImageDigest")]
+    target_image_digest: String,
+    #[serde(rename = "blobSha256")]
+    blob_sha256: String,
+}
+
+impl From<DesiredMetadataJson> for DesiredMetadata {
+    fn from(j: DesiredMetadataJson) -> Self {
+        DesiredMetadata {
+            name: j.name,
+            target_image_digest: j.target_image_digest,
+            blob_sha256: j.blob_sha256,
+        }
+    }
+}
+
+/// Why [`apply_once`] failed.
+#[derive(Debug)]
+pub enum ApplyOnceError {
+    /// Reading the `.json` sidecar or its sibling `.raw` blob failed.
+    Io(String),
+    /// The `.json` sidecar's content couldn't be parsed as
+    /// `DesiredMetadata`.
+    Json(String),
+    /// The pipeline itself rejected or failed to apply the document.
+    Apply(ApplyError),
+}
+
+impl fmt::Display for ApplyOnceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApplyOnceError::Io(msg) | ApplyOnceError::Json(msg) => write!(f, "{msg}"),
+            ApplyOnceError::Apply(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ApplyOnceError {}
+
+/// Reads `desired_json_path` (a `<name>.json` sidecar) and its sibling
+/// `<name>.raw` blob from the same directory, then applies them via
+/// [`apply`]. Returns the applied document's name on success.
+pub fn apply_once(desired_json_path: &Path, ops: &mut dyn Ops) -> Result<String, ApplyOnceError> {
+    let json_data = fs::read(desired_json_path)
+        .map_err(|e| ApplyOnceError::Io(format!("read {}: {e}", desired_json_path.display())))?;
+    let meta: DesiredMetadataJson = serde_json::from_slice(&json_data)
+        .map_err(|e| ApplyOnceError::Json(format!("parse {}: {e}", desired_json_path.display())))?;
+    let meta: DesiredMetadata = meta.into();
+
+    let raw_path = desired_json_path.with_extension("raw");
+    let blob = fs::read(&raw_path)
+        .map_err(|e| ApplyOnceError::Io(format!("read {}: {e}", raw_path.display())))?;
+
+    apply(&meta, &blob, ops).map_err(ApplyOnceError::Apply)?;
+    Ok(meta.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+    use crate::pipeline::{Bookkeeping, BootcStatus, OpsError};
+
+    /// The one committed golden fixture pair under `contract/fixtures/`.
+    fn fixture_json_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../contract/fixtures/\
+             72512d0ec06ea6ac45ce0a3df4b22ed1dc06b7186a1281b6b0a18bb5ebd37286.json",
+        )
+    }
+
+    #[derive(Default)]
+    struct FakeOps {
+        calls: Vec<String>,
+    }
+
+    impl Ops for FakeOps {
+        fn place(&mut self, name: &str, _blob: &[u8]) -> Result<(), OpsError> {
+            self.calls.push(format!("place:{name}"));
+            Ok(())
+        }
+
+        fn refresh(&mut self) -> Result<(), OpsError> {
+            self.calls.push("refresh".to_string());
+            Ok(())
+        }
+
+        fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
+            self.calls.push("read_bookkeeping".to_string());
+            Ok(Bookkeeping::default())
+        }
+
+        fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError> {
+            self.calls.push(format!(
+                "write_bookkeeping:{}:{}",
+                bk.desired_name, bk.expected_digest
+            ));
+            Ok(())
+        }
+
+        fn bootc_status(&mut self) -> Result<Option<BootcStatus>, OpsError> {
+            self.calls.push("bootc_status".to_string());
+            Ok(None)
+        }
+
+        fn bootc_switch(&mut self, image_ref: &str) -> Result<(), OpsError> {
+            self.calls.push(format!("bootc_switch:{image_ref}"));
+            Ok(())
+        }
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn parses_real_fixture_and_verifies_checksum_against_sibling_raw() {
+        let json_path = fixture_json_path();
+        let name = json_path.file_stem().unwrap().to_str().unwrap().to_string();
+
+        // Parse straight off the real fixture (not synthetic data): if
+        // this doesn't match, the parsing logic is wrong, not the
+        // fixture (contract/fixtures/fixtures_test.go already enforces
+        // the fixture's internal consistency on the Go side).
+        let json_data = fs::read(&json_path).expect("read fixture .json");
+        let meta: DesiredMetadataJson = serde_json::from_slice(&json_data).unwrap();
+        assert_eq!(
+            meta.name, name,
+            "metadata name must match the fixture filename"
+        );
+        let digest_hex = meta
+            .target_image_digest
+            .strip_prefix("sha256:")
+            .expect("target_image_digest should have a sha256: prefix");
+        assert_eq!(
+            digest_hex.len(),
+            64,
+            "sha256 digest should be 64 hex chars, got {digest_hex:?}"
+        );
+        assert!(digest_hex.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let raw_path = json_path.with_extension("raw");
+        let raw = fs::read(&raw_path).expect("read fixture .raw");
+        let got_sha = hex_encode(Sha256::digest(&raw).as_slice());
+        assert_eq!(
+            got_sha, meta.blob_sha256,
+            "sha256(fixture .raw) must match its .json sidecar's blobSha256"
+        );
+
+        let mut ops = FakeOps::default();
+        let applied_name = apply_once(&json_path, &mut ops).unwrap();
+
+        assert_eq!(applied_name, name);
+        assert!(ops.calls.contains(&format!("place:{name}")));
+    }
+
+    #[test]
+    fn missing_raw_sibling_is_an_io_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let json_path = dir.path().join("no-such-name.json");
+        fs::write(
+            &json_path,
+            br#"{"name":"no-such-name","targetImageDigest":"sha256:AAA","blobSha256":"deadbeef"}"#,
+        )
+        .unwrap();
+
+        let mut ops = FakeOps::default();
+        let err = apply_once(&json_path, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyOnceError::Io(_)));
+        assert!(ops.calls.is_empty());
+    }
+}
