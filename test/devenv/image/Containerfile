@@ -1,0 +1,115 @@
+# Devenv bootc image for Step 1 real-machine verification (nanokube).
+#
+# Replicates the package lineage of the homelab production images:
+#   - references/bootc-dev/... (not used directly; read-only reference)
+#   - homelab/containers/bootc/base/fedora.Containerfile        (base: fedora-bootc)
+#   - homelab/containers/bootc/kubernetes/base.Containerfile    (kubelet/kubeadm v1.35, cri-o, greenboot)
+#
+# PLUS exactly one intentional devenv-only patch (confirmed with the user):
+#   the kubelet.service drop-in --config flag points at
+#   /etc/kubernetes/kubelet-config.yaml instead of the kubeadm default
+#   (/var/lib/kubelet/config.yaml). See overlay/usr/lib/systemd/system/
+#   kubelet.service.d/10-kubeadm.conf.
+#
+# Everything else under overlay/ (SSH access, DHCP network unit, local
+# registry trust) is devenv provisioning glue required to make a headless
+# qemu VM reachable at all -- it has no equivalent in the homelab repo
+# because that repo's real hardware bootstrap (kickstart/ignition) lives
+# elsewhere and is out of scope here.
+
+ARG KUBERNETES_VERSION="v1.35"
+ARG KUBEADM_VERSION="v1.35"
+ARG CRIO_VERSION=${KUBERNETES_VERSION}
+
+# Stage 1: download the kubeadm binary (mirrors homelab's kubeadm-downloader stage)
+FROM registry.fedoraproject.org/fedora-minimal:latest@sha256:4c2b3e10fade03be7111966f48ca67fadf491e65c487577f52e0ce3c9afe42bd AS kubeadm-downloader
+ARG KUBEADM_VERSION
+ARG TARGETARCH
+RUN microdnf install -y curl && \
+    RELEASE="$(curl -sSL https://dl.k8s.io/release/stable-${KUBEADM_VERSION#v}.txt)" && \
+    mkdir -p /opt/bin && \
+    curl -L -o /opt/bin/kubeadm "https://dl.k8s.io/release/${RELEASE}/bin/linux/${TARGETARCH}/kubeadm" && \
+    chmod +x /opt/bin/kubeadm
+
+# Stage 2: devenv bootc image
+FROM quay.io/fedora/fedora-bootc:latest
+
+ARG KUBERNETES_VERSION
+ARG KUBEADM_VERSION
+ARG CRIO_VERSION
+ARG DEVENV_SSH_PUBKEY
+
+RUN echo "$KUBERNETES_VERSION" > /etc/dnf/vars/kubever
+RUN echo "$CRIO_VERSION" > /etc/dnf/vars/criover
+
+COPY repos/cri-o.repo /etc/yum.repos.d/cri-o.repo
+COPY repos/kubernetes.repo /etc/yum.repos.d/kubernetes.repo
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+    --setopt=zchunk=False \
+    --setopt=tsflags=nodocs \
+    cri-o \
+    kubelet \
+    kubectl \
+    crun \
+    container-selinux \
+    libseccomp \
+    dbus-daemon \
+    tuned \
+    sudo \
+    vim \
+    nano \
+    bubblewrap \
+    openssh-server \
+    python3-libselinux \
+    python3-libsemanage \
+    parted \
+    btrfs-progs \
+    lvm2 \
+    systemd-networkd \
+    fastfetch \
+    systemd-resolved \
+    greenboot \
+    greenboot-default-health-checks && \
+    dnf clean all
+
+COPY --from=kubeadm-downloader /opt/bin/kubeadm /usr/bin/kubeadm
+
+# --- devenv-only patch: kubelet config path (see header comment) ---
+COPY overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+# --- devenv-only provisioning glue (not part of homelab lineage) ---
+COPY overlay/etc/systemd/network/20-wired.network /etc/systemd/network/20-wired.network
+COPY overlay/etc/containers/registries.conf.d/10-devenv-registry.conf /etc/containers/registries.conf.d/10-devenv-registry.conf
+COPY overlay/usr/lib/tmpfiles.d/nanokube-devenv.conf /usr/lib/tmpfiles.d/nanokube-devenv.conf
+
+# NOTE: /home is a symlink to /var/home on this ostree/bootc base. Content
+# written under /var at build time does not survive into the deployed OS, so
+# the devenv user's home dir + authorized_keys are recreated at first boot by
+# the tmpfiles.d entry above instead of being materialized here. Only the key
+# *source* (under /usr, which is part of the committed image like any other
+# file) is written during the build.
+RUN useradd -M -G wheel devenv && \
+    echo "devenv ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/devenv && \
+    chmod 440 /etc/sudoers.d/devenv && \
+    install -d -m 755 /usr/share/nanokube-devenv && \
+    echo "${DEVENV_SSH_PUBKEY}" > /usr/share/nanokube-devenv/authorized_keys && \
+    chmod 644 /usr/share/nanokube-devenv/authorized_keys
+
+RUN systemctl enable tuned && \
+    systemctl enable systemd-networkd && \
+    systemctl enable systemd-resolved && \
+    systemctl enable sshd && \
+    systemctl enable systemd-timesyncd
+
+RUN dnf clean all
+RUN rm /var/{log,cache,lib}/* -rf
+RUN bootc container lint
+
+LABEL containers.bootc=1
+LABEL ostree.bootable=1
+LABEL org.opencontainers.image.title="nanokube-devenv"
+LABEL org.opencontainers.image.description="Devenv bootc image for Step 1 real-machine verification (nanokube)"
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
