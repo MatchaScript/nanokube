@@ -6,3 +6,4 @@ description = "nanokube node agent: applies desired documents (confext DDI + boo
 license = "Apache-2.0"
 
 [dependencies]
+sha2 = "0.11.0"
