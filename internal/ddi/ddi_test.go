@@ -129,6 +129,23 @@ func TestBuild_SignedNeedsBothKeyAndCert(t *testing.T) {
 // etc/, not usr/lib/ (that's sysext's convention, not confext's) —
 // since confext's built-in CopyFiles=/etc/ rule only pulls from
 // <copy-source>/etc/.
+// TestExtensionReleaseContent_IncludesSysextLevel locks in the fix for a
+// real-machine finding (Step 1 実装項目6 verify): an extension-release
+// carrying only ID= is silently rejected by systemd-confext refresh on a
+// real Fedora bootc host once the host's own /etc/os-release declares a
+// VERSION_ID (confirmed against systemd 259: "does not contain
+// VERSION_ID in release file but requested to match '44'") -- it is
+// NOT treated as "no version check", contrary to older expectations.
+// SYSEXT_LEVEL is systemd's mechanism for declaring confext
+// compatibility independent of the host's ever-changing VERSION_ID.
+func TestExtensionReleaseContent_IncludesSysextLevel(t *testing.T) {
+	got := string(extensionReleaseContent("fedora"))
+	want := "ID=fedora\nSYSEXT_LEVEL=1\n"
+	if got != want {
+		t.Errorf("extensionReleaseContent(%q) = %q, want %q", "fedora", got, want)
+	}
+}
+
 func TestBuild_ExtensionReleaseConvention(t *testing.T) {
 	tree := t.TempDir()
 	release := render.File{

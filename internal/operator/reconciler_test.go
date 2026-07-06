@@ -61,14 +61,27 @@ func (p *recordingPush) fn() PushFunc {
 	}
 }
 
-// renderedName computes the same content-hash name the reconciler
-// itself derives for its (currently invariant) render input, so tests
+// renderedName computes the same content-hash name the reconciler itself
+// derives for its default (no criSocket override) render input, so tests
 // can pre-populate outputDir at the exact path Reconcile will look at.
 func renderedName(t *testing.T) string {
+	t.Helper()
+	return renderedNameForCRISocket(t, "")
+}
+
+// renderedNameForCRISocket is renderedName generalized to an explicit
+// cfg.NodeRegistration.CRISocket override, mirroring exactly what
+// Reconcile itself does with CRISocketKey: an empty criSocket leaves the
+// kubeadm-defaulted cfg untouched. Lets tests compute the expected name
+// for a given ConfigMap criSocket value independently of the reconciler.
+func renderedNameForCRISocket(t *testing.T, criSocket string) string {
 	t.Helper()
 	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
 	if err != nil {
 		t.Fatalf("DefaultedStaticInitConfiguration: %v", err)
+	}
+	if criSocket != "" {
+		cfg.NodeRegistration.CRISocket = criSocket
 	}
 	kubeletFile, err := render.KubeletConfig(cfg)
 	if err != nil {
@@ -273,6 +286,75 @@ func TestReconcile_DetectsDigestChange(t *testing.T) {
 	}
 	if push.calls[1].meta.TargetImageDigest != testDigest2 {
 		t.Errorf("2nd push TargetImageDigest = %q, want %q", push.calls[1].meta.TargetImageDigest, testDigest2)
+	}
+}
+
+// TestReconcile_CRISocketKeyChangesRenderedName is the CRISocketKey
+// counterpart to TestReconcile_DetectsDigestChange: unlike the digest
+// (deliberately excluded from Desired.Name's hash), a criSocket override
+// actually changes the rendered kubelet config bytes (it flows into the
+// kubelet instance config patch render.KubeletConfig writes), so it must
+// change Desired.Name() too. Confirms the pushed name matches an
+// independently-computed renderedNameForCRISocket, and differs from the
+// no-override default name.
+func TestReconcile_CRISocketKeyChangesRenderedName(t *testing.T) {
+	const criSocket = "unix:///var/run/crio/crio.sock"
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+		Data:       map[string]string{TargetImageDigestKey: testDigest1, CRISocketKey: criSocket},
+	}
+	push := &recordingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          t.TempDir(),
+		Push:               push.fn(),
+	}
+
+	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(push.calls) != 1 {
+		t.Fatalf("push called %d times, want 1", len(push.calls))
+	}
+
+	want := renderedNameForCRISocket(t, criSocket)
+	if got := push.calls[0].meta.Name; got != want {
+		t.Errorf("meta.Name = %q, want %q (rendered with criSocket override)", got, want)
+	}
+	if got := push.calls[0].meta.Name; got == renderedName(t) {
+		t.Errorf("meta.Name = %q, same as the no-override default -- criSocket change did not affect rendered content", got)
+	}
+}
+
+// TestReconcile_EmptyCRISocketFallsBackToDefault checks the other half of
+// the same contract: an absent (or explicitly empty) criSocket key must
+// not error, and must render identically to a ConfigMap that never had
+// the key at all -- i.e. it falls back to kubeadm's own default rather
+// than e.g. setting CRISocket to the empty string.
+func TestReconcile_EmptyCRISocketFallsBackToDefault(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+		Data:       map[string]string{TargetImageDigestKey: testDigest1, CRISocketKey: ""},
+	}
+	push := &recordingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          t.TempDir(),
+		Push:               push.fn(),
+	}
+
+	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(push.calls) != 1 {
+		t.Fatalf("push called %d times, want 1", len(push.calls))
+	}
+	if got, want := push.calls[0].meta.Name, renderedName(t); got != want {
+		t.Errorf("meta.Name = %q, want %q (empty criSocket must fall back to the default render)", got, want)
 	}
 }
 

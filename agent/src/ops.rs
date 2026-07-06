@@ -161,8 +161,23 @@ impl<R: CommandRunner> Ops for RealOps<R> {
     }
 
     fn refresh(&mut self) -> Result<(), OpsError> {
+        // --force ("ignore version incompatibilities", per systemd-confext
+        // --help) is required for real merges to take effect at all on a
+        // real bootc host: confirmed against systemd 259 on Fedora 44 that
+        // an extension-release lacking a version field is NOT treated as
+        // "no version check" -- it is rejected ("does not contain
+        // VERSION_ID in release file but requested to match '44'"), and a
+        // node cannot generally be expected to have already booted an OS
+        // image whose /etc/os-release declares a matching SYSEXT_LEVEL for
+        // whatever confext content this cycle delivers (config delivery
+        // must work independent of image staging/reboot -- see
+        // docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md's
+        // no-reboot-required design). --force only ignores the version
+        // check, not ID matching (confirmed via --help's own wording,
+        // scoped to "version incompatibilities"), so a confext built for
+        // an unrelated OS ID is still rejected.
         self.runner
-            .run("systemd-confext", &["refresh", "--mutable=yes"])
+            .run("systemd-confext", &["refresh", "--mutable=yes", "--force"])
             .map(|_| ())
             .map_err(to_ops_error)
     }
@@ -442,7 +457,10 @@ mod tests {
 
         assert_eq!(
             ops.runner.calls,
-            vec![call("systemd-confext", &["refresh", "--mutable=yes"])]
+            vec![call(
+                "systemd-confext",
+                &["refresh", "--mutable=yes", "--force"]
+            )]
         );
     }
 

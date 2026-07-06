@@ -74,6 +74,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     lvm2 \
     systemd-networkd \
     fastfetch \
+    jq \
     systemd-resolved \
     greenboot \
     greenboot-default-health-checks && \
@@ -83,6 +84,14 @@ COPY --from=kubeadm-downloader /opt/bin/kubeadm /usr/bin/kubeadm
 
 # --- devenv-only patch: kubelet config path (see header comment) ---
 COPY overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+# --- confext compatibility: declare SYSEXT_LEVEL so systemd-confext accepts
+# nanokube's confexts (see internal/ddi.Build's extensionReleaseSysextLevel
+# doc comment: an extension-release with only ID= is rejected outright by a
+# real systemd-confext refresh once the host's own os-release carries a
+# VERSION_ID, which this Fedora bootc base always does). Not devenv-only:
+# any real nanokube node image needs this line. ---
+RUN echo "SYSEXT_LEVEL=1" >> /usr/lib/os-release
 
 # --- nanokube-agent: baked into the image, built by build-image.sh (host
 # `cargo build --release` from agent/, since the image itself carries no Rust

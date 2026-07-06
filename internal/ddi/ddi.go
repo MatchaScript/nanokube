@@ -28,6 +28,33 @@ var ErrSystemdRepartNotFound = errors.New("systemd-repart not found in PATH")
 // nested under etc/, not usr/lib/.
 const extensionReleaseDir = "etc/extension-release.d"
 
+// extensionReleaseSysextLevel is written as SYSEXT_LEVEL= in every
+// confext's extension-release file. Confirmed against a real Fedora 44
+// bootc host (systemd 259): an extension-release carrying only ID= (no
+// SYSEXT_LEVEL, no VERSION_ID) is not treated as "no version check" —
+// systemd-confext refresh instead logs "does not contain VERSION_ID in
+// release file but requested to match '44'" and silently drops the
+// extension. SYSEXT_LEVEL is systemd's mechanism for a confext
+// version-compatibility marker independent of the host's own VERSION_ID
+// (which changes every OS release and is otherwise unrelated to confext
+// content compatibility) — see test/devenv/image/Containerfile, which
+// declares a matching SYSEXT_LEVEL in the node image's /etc/os-release.
+//
+// This alone is NOT sufficient for delivery before a node has actually
+// booted an image build carrying that os-release line: a node running
+// an older image (or, in Step 1, one that never reboots at all) still
+// checks against whatever /etc/os-release it currently has booted, so
+// the agent's systemd-confext refresh also passes --force ("ignore
+// version incompatibilities") to make delivery work independent of
+// image staging/reboot, matching the architecture's no-reboot-required
+// design (see agent/src/ops.rs's refresh, and
+// docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md). Once a
+// node has booted an image whose os-release matches this SYSEXT_LEVEL,
+// matching is exact even without --force; keeping this line is what
+// makes that eventually true instead of confexts depending on --force
+// forever.
+const extensionReleaseSysextLevel = "1"
+
 // BuildInput specifies what to bake into a confext DDI.
 type BuildInput struct {
 	// Name is the confext version name (typically render.Desired.Name()).
@@ -74,7 +101,7 @@ func Build(input BuildInput, outputPath string) error {
 
 	release := render.File{
 		Path:    filepath.Join(extensionReleaseDir, "extension-release."+input.Name),
-		Content: []byte("ID=" + input.ExtensionReleaseID + "\n"),
+		Content: extensionReleaseContent(input.ExtensionReleaseID),
 	}
 	if err := writeTreeFile(tree, release); err != nil {
 		return err
@@ -104,6 +131,13 @@ func Build(input BuildInput, outputPath string) error {
 		return fmt.Errorf("ddi: %s: %w: %s", cmd.String(), err, out.String())
 	}
 	return nil
+}
+
+// extensionReleaseContent returns a confext extension-release file's
+// content for the given ID (see extensionReleaseSysextLevel for why
+// SYSEXT_LEVEL is included alongside it).
+func extensionReleaseContent(id string) []byte {
+	return []byte("ID=" + id + "\nSYSEXT_LEVEL=" + extensionReleaseSysextLevel + "\n")
 }
 
 // writeTreeFile writes f under tree, creating parent directories as
