@@ -1,0 +1,262 @@
+// Package operator implements nanokube-operator's Step 1 skeleton
+// reconcile loop: watch a single, fixed ConfigMap (the stand-in desired
+// source before CRDs land in Step 4), render it (internal/render) and
+// build a confext DDI from the result (internal/ddi), then hand the
+// outcome to a PushFunc — the seam that today writes the result to a
+// local directory and later (a separate task, once nanokube-agent
+// exists) will dial --agent-addr and call the generated
+// desiredpb.AgentClient.PushDesired instead, without Reconcile itself
+// changing. See
+// docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md, 実装項目5.
+package operator
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/MatchaScript/nanokube/contract/desiredpb"
+	"github.com/MatchaScript/nanokube/internal/ddi"
+	"github.com/MatchaScript/nanokube/internal/render"
+)
+
+// TargetImageDigestKey is the ConfigMap Data key the reconciler reads as
+// the Step 1 stand-in for CRD-resolved digest input (Step 4 adds the
+// real CRD + northbound API; see the architecture doc's "CRD" section).
+const TargetImageDigestKey = "targetImageDigest"
+
+// extensionReleaseID is the confext extension-release ID ddi.Build
+// writes, matching the literal contract/fixtures/gen uses for the same field —
+// duplicated rather than shared because gen is out of scope for this
+// task and the two call sites have no other reason to be coupled.
+const extensionReleaseID = "fedora"
+
+// buildSkippedSentinel is written as DesiredMetadata.BlobSha256 when
+// ddi.Build could not run because systemd-repart (and, transitively,
+// mkfs.erofs) is missing from PATH -- the case on a bare Kind/dev host.
+// It is a deliberately non-hex-looking sentinel, never a real sha256,
+// so nothing downstream can mistake a skipped build for a built one.
+const buildSkippedSentinel = "build-skipped-systemd-repart-unavailable"
+
+// isBuildToolMissing reports whether err reflects this host lacking the
+// tooling ddi.Build needs, rather than a genuine build failure. There
+// are two known shapes, both confirmed on this repo's own dev host:
+// systemd-repart itself absent from PATH (ddi.ErrSystemdRepartNotFound,
+// checked with errors.Is), or systemd-repart present but unable to find
+// its own mkfs.erofs helper, which ddi.Build only surfaces as
+// systemd-repart's captured stderr text ("mkfs.erofs binary not
+// available.") wrapped into a plain error -- there is no sentinel error
+// for that case in internal/ddi to match on structurally.
+func isBuildToolMissing(err error) bool {
+	return errors.Is(err, ddi.ErrSystemdRepartNotFound) || strings.Contains(err.Error(), "mkfs.erofs")
+}
+
+// readExistingMetadata returns the sidecar previously written to
+// jsonPath, or ok=false if none exists yet or it can't be parsed -- a
+// corrupt sidecar is treated the same as "none" (just rebuilt below)
+// rather than becoming a standing reconcile failure.
+func readExistingMetadata(jsonPath string) (m *desiredpb.DesiredMetadata, ok bool) {
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return nil, false
+	}
+	m = &desiredpb.DesiredMetadata{}
+	if err := protojson.Unmarshal(data, m); err != nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// PushFunc delivers a rendered-and-(maybe-)built desired document
+// somewhere. meta is always populated (with a sentinel BlobSha256 when
+// the build was skipped); rawPath is the confext DDI blob's local path
+// and may not exist -- implementations must check before reading it.
+//
+// The Step 1 skeleton's only implementation, NewLocalPush, writes meta
+// to a local directory and logs what it would have pushed, instead of
+// making a network call. A later task (once nanokube-agent exists)
+// swaps in a PushFunc that dials --agent-addr and calls
+// desiredpb.AgentClient.PushDesired with meta and rawPath's bytes --
+// Reconciler.Reconcile does not need to change for that swap.
+type PushFunc func(ctx context.Context, meta *desiredpb.DesiredMetadata, rawPath string) error
+
+// NewLocalPush returns the Step 1 stand-in PushFunc: it protojson-marshals
+// meta (same MarshalOptions contract/fixtures/gen uses, so the sidecar
+// format matches the golden fixtures) to <name>.json under outputDir and
+// logs what it would have pushed and to which agent address, without
+// dialing anything. agentAddr is documentation-only here -- see the
+// package doc comment.
+func NewLocalPush(outputDir, agentAddr string) PushFunc {
+	return func(ctx context.Context, meta *desiredpb.DesiredMetadata, rawPath string) error {
+		data, err := (protojson.MarshalOptions{Multiline: true, Indent: "  "}).Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("operator: marshal metadata: %w", err)
+		}
+		jsonPath := filepath.Join(outputDir, meta.Name+".json")
+		if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
+			return fmt.Errorf("operator: write %s: %w", jsonPath, err)
+		}
+		log.FromContext(ctx).Info("would push to agent (Step 1 stand-in: local write only, no network call made)",
+			"agentAddr", agentAddr, "name", meta.Name, "rawPath", rawPath, "jsonPath", jsonPath)
+		return nil
+	}
+}
+
+// Reconciler reconciles exactly one ConfigMap -- identified by
+// ConfigMapName/ConfigMapNamespace -- into a rendered + built confext
+// DDI, handed to Push. It ignores every other object the manager's
+// watch delivers.
+type Reconciler struct {
+	Client             client.Client
+	ConfigMapName      string
+	ConfigMapNamespace string
+	// OutputDir is where the built <name>.raw lands and where the
+	// up-to-date check below looks for <name>.json.
+	OutputDir string
+	Push      PushFunc
+}
+
+// SetupWithManager registers r against mgr, watching ConfigMaps only.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.ConfigMap{}).
+		Named("nanokube-operator-configmap").
+		Complete(r)
+}
+
+// +kubebuilder:rbac:groups=,resources=configmaps,verbs=get;list;watch
+
+// Reconcile implements the one-cycle loop 実装項目5 of the implementation
+// plan asks for: detect input change -> render -> attempt build -> push
+// (today: local-write stand-in) -> done. Every step after render/build
+// depends on the previous one having succeeded; Reconcile returns (and
+// controller-runtime retries) on the first unexpected error.
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if req.Name != r.ConfigMapName || req.Namespace != r.ConfigMapNamespace {
+		// Not our ConfigMap; the manager's watch is cluster-wide but we
+		// only care about one object. No CRD/admission-time filtering
+		// exists yet (Step 4), so this check is the filter.
+		return ctrl.Result{}, nil
+	}
+
+	var cm corev1.ConfigMap
+	if err := r.Client.Get(ctx, req.NamespacedName, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("target ConfigMap not found, nothing to do", "name", req.Name, "namespace", req.Namespace)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("operator: get configmap: %w", err)
+	}
+
+	targetImageDigest := cm.Data[TargetImageDigestKey]
+	if targetImageDigest == "" {
+		logger.Info("configmap has no targetImageDigest, nothing to do", "key", TargetImageDigestKey)
+		return ctrl.Result{}, nil
+	}
+
+	// Render is a pure function of (kubeadm's static defaults, this
+	// process's environment) for this skeleton -- there is no per-node
+	// variance yet -- so it is cheap and side-effect-free to always run,
+	// which is also how the confext version name (a content hash of the
+	// rendered files) is discovered in the first place.
+	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: DefaultedStaticInitConfiguration: %w", err)
+	}
+	kubeletFile, err := render.KubeletConfig(cfg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: render.KubeletConfig: %w", err)
+	}
+	desired := render.Desired{ImageDigest: targetImageDigest, Files: []render.File{kubeletFile}}
+	name := desired.Name()
+	logger.Info("rendered desired document", "name", name, "targetImageDigest", targetImageDigest)
+
+	rawPath := filepath.Join(r.OutputDir, name+".raw")
+	jsonPath := filepath.Join(r.OutputDir, name+".json")
+
+	// The document Push actually delivers is (name, targetImageDigest)
+	// together -- name alone is not the full story, because
+	// render.Desired.Name() deliberately excludes the digest (see its
+	// doc comment: an image-only update must not force a DDI rebuild).
+	// So "nothing to do at all" has to be checked against both: if the
+	// sidecar already on disk for this name was written for this same
+	// digest, this is a true no-op repeat, mirroring internal/agent's
+	// content-hash-identity-needs-no-extra-tracking principle without
+	// losing digest-only changes to it. A missing or unparseable sidecar
+	// just means "not up to date" -- rebuilt below like any first run.
+	if existing, ok := readExistingMetadata(jsonPath); ok && existing.GetTargetImageDigest() == targetImageDigest {
+		logger.Info("already up to date, skipping build and push", "name", name, "targetImageDigest", targetImageDigest)
+		return ctrl.Result{}, nil
+	}
+
+	if err := os.MkdirAll(r.OutputDir, 0o755); err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: mkdir output dir: %w", err)
+	}
+
+	var blobSha256 string
+	if raw, err := os.ReadFile(rawPath); err == nil {
+		// The DDI blob for this name was already built by an earlier
+		// reconcile (its content is a pure function of desired.Files,
+		// which name already hashes over) -- rebuilding would only
+		// reproduce the same bytes, so reuse it instead of re-invoking
+		// systemd-repart. This is exactly the case a digest-only
+		// ConfigMap update hits: same confext content, new target image.
+		sum := sha256.Sum256(raw)
+		blobSha256 = hex.EncodeToString(sum[:])
+		logger.Info("DDI already built for this name, reusing it", "name", name, "rawPath", rawPath, "bytes", len(raw))
+	} else {
+		blobSha256 = buildSkippedSentinel
+		buildErr := ddi.Build(ddi.BuildInput{
+			Name:               name,
+			ExtensionReleaseID: extensionReleaseID,
+			Files:              desired.Files,
+		}, rawPath)
+		switch {
+		case buildErr == nil:
+			raw, err := os.ReadFile(rawPath)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("operator: read back built blob: %w", err)
+			}
+			sum := sha256.Sum256(raw)
+			blobSha256 = hex.EncodeToString(sum[:])
+			logger.Info("built confext DDI", "name", name, "rawPath", rawPath, "bytes", len(raw))
+		case isBuildToolMissing(buildErr):
+			// A real environment gap (bare Kind/dev hosts typically lack
+			// systemd-repart and/or mkfs.erofs), not something to paper
+			// over: log it clearly and keep going with a sentinel so the
+			// rest of the reconcile loop (push + its logging) remains
+			// exercisable end to end even where a real DDI can't be
+			// produced here.
+			logger.Info("WARNING: DDI build tooling unavailable, skipping build; writing sidecar with a sentinel blob_sha256 instead of a real one",
+				"name", name, "blobSha256", blobSha256, "buildErr", buildErr)
+		default:
+			return ctrl.Result{}, fmt.Errorf("operator: ddi.Build: %w", buildErr)
+		}
+	}
+
+	meta := &desiredpb.DesiredMetadata{
+		Name:              name,
+		TargetImageDigest: targetImageDigest,
+		BlobSha256:        blobSha256,
+	}
+	if err := r.Push(ctx, meta, rawPath); err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: push: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
