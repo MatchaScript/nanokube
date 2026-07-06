@@ -86,7 +86,7 @@ jobs:
       image: quay.io/fedora/fedora:42
     steps:
       - name: Install build dependencies
-        run: dnf install -y systemd-container systemd-udev erofs-utils --setopt=install_weak_deps=False -q
+        run: dnf install -y systemd-container systemd-udev erofs-utils gcc --setopt=install_weak_deps=False -q
 
       - uses: actions/checkout@v4
 
