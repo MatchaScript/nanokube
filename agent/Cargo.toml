@@ -1,0 +1,8 @@
+[package]
+name = "nanokube-agent"
+version = "0.1.0"
+edition = "2024"
+description = "nanokube node agent: applies desired documents (confext DDI + bootc stage)"
+license = "Apache-2.0"
+
+[dependencies]
