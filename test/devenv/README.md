@@ -206,6 +206,24 @@ errors were found"), and a fresh VM was booted from it. `build-image.sh` now
 refuses to run while `qemu.pid` names a live process, so this can't
 recur silently.
 
+**Race, closed both directions (2026-07-06)**: the guard above only checked
+`qemu.pid` once, at `build-image.sh`'s start -- it didn't protect against a
+VM being booted *during* the several-minutes-long `cargo build` -> `podman
+build` -> push/pull sequence, before the actual `bootc-image-builder` step
+that overwrites the qcow2 runs. `build-image.sh` now also writes
+`${STATE_DIR}/.build-in-progress` (containing its own PID) as soon as it
+starts, via a `trap ... EXIT` that removes it on any exit (success, failure,
+or signal), and re-checks `qemu.pid` a second time immediately before the
+`bootc-image-builder` step -- catching a VM started in the gap instead of
+overwriting its disk. Symmetrically, `boot-vm.sh` now refuses to boot while
+`.build-in-progress` names a live PID, since booting into a disk
+`build-image.sh` is still writing would corrupt it the same way rebuilding
+into a live VM's disk does. A `.build-in-progress` left behind by a
+`build-image.sh` that didn't exit cleanly (e.g. `kill -9`, bypassing the
+trap) is treated as stale once its PID is no longer alive (`kill -0`,
+mirroring the `qemu.pid` guard's own idiom) and is ignored/cleaned up rather
+than blocking `boot-vm.sh` forever.
+
 - Fresh VM booted from the rebuilt image; `bootc status` showed the
   expected first-boot quirk (booted image `localhost:5000/...`); reapplied
   `sudo bootc switch --transport registry 10.0.2.2:5000/nanokube-devenv:latest`,
@@ -260,6 +278,8 @@ All under `/var/tmp/nanokube-devenv/`:
 - `logs/` -- build logs and the VM's serial console log.
 - `qemu.pid`, `qemu-monitor.sock` -- the running qemu process's pidfile and
   QMP monitor socket (see "Stopping the VM" below).
+- `.build-in-progress` -- present only while `build-image.sh` is running
+  (contains its PID); see the race note above.
 
 ## Stopping the VM / cleaning up
 
