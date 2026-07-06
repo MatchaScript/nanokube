@@ -73,6 +73,39 @@ jobs:
         run: cargo test
 
   # ---------------------------------------------------------------------------
+  # DDI builder (Local lane build tooling). internal/ddi shells out to
+  # systemd-repart --make-ddi=confext, which needs systemd 256+ and
+  # erofs-utils (mkfs.erofs) — neither is on the plain ubuntu-24.04 runner,
+  # so this job runs inside a Fedora container to actually exercise the
+  # real, non-skipped build path.
+  # ---------------------------------------------------------------------------
+  ddi:
+    name: DDI builder (confext)
+    runs-on: ubuntu-24.04
+    container:
+      image: quay.io/fedora/fedora:42
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y systemd-container systemd-udev erofs-utils gcc --setopt=install_weak_deps=False -q
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache: true
+
+      - name: go vet
+        run: go vet ./internal/ddi/...
+
+      - name: go build
+        run: go build ./internal/ddi/...
+
+      - name: go test -race
+        run: go test -race -count=1 -v ./internal/ddi/...
+
+  # ---------------------------------------------------------------------------
   # E2E suite — installs CRI-O, kubelet, kubectl on the runner via
   # test/e2e/setup.sh, then drives the full init → boot → workload →
   # reset lifecycle as a Go testify suite. Slow (~10 min) and needs sudo,
