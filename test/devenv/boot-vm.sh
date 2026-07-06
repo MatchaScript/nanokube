@@ -20,11 +20,29 @@ AGENT_PORT="${AGENT_PORT:-9090}"
 MEMORY_MB="${MEMORY_MB:-4096}"
 VCPUS="${VCPUS:-2}"
 PIDFILE="${STATE_DIR}/qemu.pid"
+MARKER="${STATE_DIR}/.build-in-progress"
 SERIAL_LOG="${STATE_DIR}/logs/serial-console.log"
 MONITOR_SOCK="${STATE_DIR}/qemu-monitor.sock"
 OVMF_CODE="/usr/share/edk2/ovmf/OVMF_CODE.fd"
 OVMF_VARS_TEMPLATE="/usr/share/edk2/ovmf/OVMF_VARS.fd"
 OVMF_VARS="${STATE_DIR}/ovmf-vars.fd"
+
+if [ -f "${MARKER}" ]; then
+  BUILD_PID="$(cat "${MARKER}" 2>/dev/null || true)"
+  if [ -n "${BUILD_PID}" ] && kill -0 "${BUILD_PID}" 2>/dev/null; then
+    echo "error: build-image.sh is currently running (pid ${BUILD_PID})." >&2
+    echo "  Its last step overwrites ${DISK} in place; booting now would open" >&2
+    echo "  that same path while build-image.sh is still writing a fresh image to it," >&2
+    echo "  corrupting this VM's disk the same way a rebuild-while-running does (confirmed" >&2
+    echo "  2026-07-06 -- see README's dated incident note)." >&2
+    echo "  Wait for build-image.sh to finish, then boot." >&2
+    exit 1
+  fi
+  # BUILD_PID is gone: a stale marker left behind by a build-image.sh that
+  # didn't exit cleanly (e.g. kill -9, bypassing its EXIT trap). Safe to
+  # ignore and clean up rather than block booting forever.
+  rm -f "${MARKER}"
+fi
 
 if [ ! -f "${DISK}" ]; then
   echo "error: disk image not found at ${DISK}" >&2

@@ -19,16 +19,30 @@ PROTOC_DIR="${STATE_DIR}/tools/protoc"
 PROTOC_VERSION="35.1"
 
 PIDFILE="${STATE_DIR}/qemu.pid"
-if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
-  echo "error: a devenv VM is currently running (pid $(cat "${PIDFILE}")), holding" >&2
-  echo "  ${STATE_DIR}/output/qcow2/disk.qcow2 open as its backing disk." >&2
-  echo "  Rebuilding overwrites that same path in place: bootc-image-builder writing a" >&2
-  echo "  fresh qcow2 there while the running VM concurrently reads/writes it corrupts" >&2
-  echo "  the live guest filesystem (confirmed: ext4 journal abort, unrecoverable" >&2
-  echo "  qemu-img check errors -- see README's dated incident note)." >&2
-  echo "  Stop the VM first: kill \"\$(cat ${PIDFILE})\"" >&2
-  exit 1
-fi
+MARKER="${STATE_DIR}/.build-in-progress"
+
+check_vm_not_running() {
+  if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
+    echo "error: a devenv VM is currently running (pid $(cat "${PIDFILE}")), holding" >&2
+    echo "  ${STATE_DIR}/output/qcow2/disk.qcow2 open as its backing disk." >&2
+    echo "  Rebuilding overwrites that same path in place: bootc-image-builder writing a" >&2
+    echo "  fresh qcow2 there while the running VM concurrently reads/writes it corrupts" >&2
+    echo "  the live guest filesystem (confirmed: ext4 journal abort, unrecoverable" >&2
+    echo "  qemu-img check errors -- see README's dated incident note)." >&2
+    echo "  Stop the VM first: kill \"\$(cat ${PIDFILE})\"" >&2
+    exit 1
+  fi
+}
+
+check_vm_not_running
+
+# Mark a build as in progress for the whole lifetime of this script, so
+# boot-vm.sh (possibly started from another terminal) can refuse to boot
+# against a disk we're about to overwrite. Cleared on any exit -- success,
+# failure, or signal -- so a normal build-then-boot workflow never sees it.
+mkdir -p "${STATE_DIR}"
+echo "$$" >"${MARKER}"
+trap 'rm -f "${MARKER}"' EXIT
 
 mkdir -p "${SSH_DIR}" "${STATE_DIR}/output" "${STATE_DIR}/bib-store" "${STATE_DIR}/bib-rpmmd" "${STATE_DIR}/logs"
 
@@ -77,6 +91,11 @@ echo "== [4/5] pull into root's container storage (bootc-image-builder requires 
 sudo podman pull --tls-verify=false "${REGISTRY_TAG}"
 
 echo "== [5/5] bootc-image-builder: containers-storage image -> qcow2 disk =="
+# Re-check right before the step that actually overwrites disk.qcow2: the
+# cargo/podman/push/pull sequence above takes minutes, long enough for a VM
+# to have been started (e.g. boot-vm.sh in another terminal) since the check
+# at script start. Catch that here instead of corrupting a live disk.
+check_vm_not_running
 sudo podman run --rm --privileged \
   --network=host \
   --security-opt label=disable \
