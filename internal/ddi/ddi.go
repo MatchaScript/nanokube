@@ -28,42 +28,20 @@ var ErrSystemdRepartNotFound = errors.New("systemd-repart not found in PATH")
 // nested under etc/, not usr/lib/.
 const extensionReleaseDir = "etc/extension-release.d"
 
-// extensionReleaseSysextLevel is written as SYSEXT_LEVEL= in every
-// confext's extension-release file. Confirmed against a real Fedora 44
-// bootc host (systemd 259): an extension-release carrying only ID= (no
-// SYSEXT_LEVEL, no VERSION_ID) is not treated as "no version check" —
-// systemd-confext refresh instead logs "does not contain VERSION_ID in
-// release file but requested to match '44'" and silently drops the
-// extension. SYSEXT_LEVEL is systemd's mechanism for a confext
-// version-compatibility marker independent of the host's own VERSION_ID
-// (which changes every OS release and is otherwise unrelated to confext
-// content compatibility) — see test/devenv/image/Containerfile, which
-// declares a matching SYSEXT_LEVEL in the node image's /etc/os-release.
-//
-// This alone is NOT sufficient for delivery before a node has actually
-// booted an image build carrying that os-release line: a node running
-// an older image (or, in Step 1, one that never reboots at all) still
-// checks against whatever /etc/os-release it currently has booted, so
-// the agent's systemd-confext refresh also passes --force ("ignore
-// version incompatibilities") to make delivery work independent of
-// image staging/reboot, matching the architecture's no-reboot-required
-// design (see agent/src/ops.rs's refresh, and
-// docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md). Once a
-// node has booted an image whose os-release matches this SYSEXT_LEVEL,
-// matching is exact even without --force; keeping this line is what
-// makes that eventually true instead of confexts depending on --force
-// forever.
-const extensionReleaseSysextLevel = "1"
-
 // BuildInput specifies what to bake into a confext DDI.
 type BuildInput struct {
 	// Name is the confext version name (typically render.Desired.Name()).
 	// It becomes the extension-release filename suffix.
 	Name string
 
-	// ExtensionReleaseID is written as ID=<value> in the confext's
-	// extension-release file, matched against the host's /etc/os-release
-	// ID at merge time (systemd-confext refresh).
+	// ExtensionReleaseID no longer affects the built DDI: every
+	// nanokube confext's extension-release file unconditionally declares
+	// ID=_any (see extensionReleaseContent), opting out of
+	// systemd-confext's host ID/version matching entirely rather than
+	// asserting a specific host ID to match against. The field is kept,
+	// and callers may keep passing a value, purely so existing call
+	// sites outside this package's own tests don't need to change; the
+	// value itself is ignored by Build.
 	ExtensionReleaseID string
 
 	// Files are the confext-tree-relative files to bake in (e.g. from
@@ -101,7 +79,7 @@ func Build(input BuildInput, outputPath string) error {
 
 	release := render.File{
 		Path:    filepath.Join(extensionReleaseDir, "extension-release."+input.Name),
-		Content: extensionReleaseContent(input.ExtensionReleaseID),
+		Content: []byte(extensionReleaseContent),
 	}
 	if err := writeTreeFile(tree, release); err != nil {
 		return err
@@ -133,12 +111,52 @@ func Build(input BuildInput, outputPath string) error {
 	return nil
 }
 
-// extensionReleaseContent returns a confext extension-release file's
-// content for the given ID (see extensionReleaseSysextLevel for why
-// SYSEXT_LEVEL is included alongside it).
-func extensionReleaseContent(id string) []byte {
-	return []byte("ID=" + id + "\nSYSEXT_LEVEL=" + extensionReleaseSysextLevel + "\n")
-}
+// extensionReleaseContent is the confext extension-release file content
+// written for every nanokube confext DDI, verbatim and unconditionally.
+//
+// ID=_any is a documented systemd convention: it tells systemd-confext
+// this one extension declares no host affinity at all, so ID and
+// VERSION_ID/SYSEXT_LEVEL matching are skipped entirely for it, without
+// affecting matching for any other sysext/confext a real host might
+// carry. Confirmed empirically against a real Fedora bootc host
+// (systemd 259): `systemd-confext refresh --mutable=yes` (no --force)
+// accepts an ID=_any extension outright ("Extension '...' matches '_any'
+// OS."), where an extension-release carrying only ID=<host-id> (no
+// version field) is instead rejected once the host's own /etc/os-release
+// declares a VERSION_ID.
+//
+// This project deliberately chose ID=_any over the alternative of
+// passing --force to `systemd-confext refresh` (tried and reverted; see
+// agent/src/ops.rs's refresh doc history), for three reasons:
+//
+//  1. --force would have to apply at boot time too. The automatic
+//     re-merge on every boot (systemd-confext.service) runs plain
+//     `refresh`, with no flags, and is not something nanokube's agent
+//     controls -- an --force-only fix would mean delivered config
+//     silently vanishing on every reboot. ID=_any needs no such
+//     accommodation: the opt-out is baked into the extension file
+//     itself, so systemd-confext.service's own unmodified `refresh`
+//     accepts it exactly the same way an agent-triggered one does.
+//
+//  2. Host os-release version matching is structurally at odds with
+//     nanokube's update-ordering design: config is applied and
+//     merge-verified BEFORE a reboot completes an image update, so at
+//     refresh time the OLD image's os-release is still the live one --
+//     matching against it does not verify compatibility with the NEW
+//     (staged, not-yet-booted) image the config is meant for. The check
+//     is checking the wrong thing at the wrong time for this
+//     architecture's ordering.
+//
+//  3. nanokube already has stronger, purpose-built correctness
+//     guarantees than systemd's generic ID/version matching: the
+//     agent's own bookkeeping (expectedDigest <-> desiredName pairing),
+//     render.Desired.Name()'s manifest-hash-based content identity, and
+//     the single-writer invariant (only the agent ever writes to
+//     /var/lib/confexts). systemd's ID/version check is redundant for
+//     this architecture and actively conflicts with its update-ordering
+//     model -- opting out via ID=_any is a deliberate, informed choice,
+//     not a shortcut.
+const extensionReleaseContent = "ID=_any\n"
 
 // writeTreeFile writes f under tree, creating parent directories as
 // needed and defaulting to mode 0o644 when f.Mode is unset.

@@ -129,28 +129,11 @@ func TestBuild_SignedNeedsBothKeyAndCert(t *testing.T) {
 // etc/, not usr/lib/ (that's sysext's convention, not confext's) —
 // since confext's built-in CopyFiles=/etc/ rule only pulls from
 // <copy-source>/etc/.
-// TestExtensionReleaseContent_IncludesSysextLevel locks in the fix for a
-// real-machine finding (Step 1 実装項目6 verify): an extension-release
-// carrying only ID= is silently rejected by systemd-confext refresh on a
-// real Fedora bootc host once the host's own /etc/os-release declares a
-// VERSION_ID (confirmed against systemd 259: "does not contain
-// VERSION_ID in release file but requested to match '44'") -- it is
-// NOT treated as "no version check", contrary to older expectations.
-// SYSEXT_LEVEL is systemd's mechanism for declaring confext
-// compatibility independent of the host's ever-changing VERSION_ID.
-func TestExtensionReleaseContent_IncludesSysextLevel(t *testing.T) {
-	got := string(extensionReleaseContent("fedora"))
-	want := "ID=fedora\nSYSEXT_LEVEL=1\n"
-	if got != want {
-		t.Errorf("extensionReleaseContent(%q) = %q, want %q", "fedora", got, want)
-	}
-}
-
 func TestBuild_ExtensionReleaseConvention(t *testing.T) {
 	tree := t.TempDir()
 	release := render.File{
 		Path:    filepath.Join(extensionReleaseDir, fmt.Sprintf("extension-release.%s", "testconfext")),
-		Content: []byte("ID=fedora\n"),
+		Content: []byte(extensionReleaseContent),
 	}
 	if err := writeTreeFile(tree, release); err != nil {
 		t.Fatalf("writeTreeFile: %v", err)
@@ -161,7 +144,20 @@ func TestBuild_ExtensionReleaseConvention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read written extension-release at %s: %v", wantPath, err)
 	}
-	if string(got) != "ID=fedora\n" {
-		t.Fatalf("extension-release content = %q, want %q", got, "ID=fedora\n")
+	if string(got) != "ID=_any\n" {
+		t.Fatalf("extension-release content = %q, want %q", got, "ID=_any\n")
+	}
+}
+
+// TestExtensionReleaseContent_IsAlwaysAny locks in the ID=_any fix (see
+// extensionReleaseContent's doc comment for the full rationale): every
+// confext's extension-release file must declare ID=_any, regardless of
+// whatever ExtensionReleaseID a caller passes, since opting out of
+// systemd-confext's host ID/version matching entirely is what makes a
+// genuine, unmodified `systemd-confext refresh` (no --force) accept the
+// merge on a real host.
+func TestExtensionReleaseContent_IsAlwaysAny(t *testing.T) {
+	if extensionReleaseContent != "ID=_any\n" {
+		t.Fatalf("extensionReleaseContent = %q, want %q", extensionReleaseContent, "ID=_any\n")
 	}
 }
