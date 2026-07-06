@@ -1,0 +1,12 @@
+[Unit]
+Description=nanokube node agent (gRPC PushDesired server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nanokube-agent serve --listen 0.0.0.0:9090 --confexts-dir /var/lib/confexts --bookkeeping-path /var/lib/nanokube/state/agent-bookkeeping.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
