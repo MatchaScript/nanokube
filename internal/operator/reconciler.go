@@ -2,11 +2,11 @@
 // reconcile loop: watch a single, fixed ConfigMap (the stand-in desired
 // source before CRDs land in Step 4), render it (internal/render) and
 // build a confext DDI from the result (internal/ddi), then hand the
-// outcome to a PushFunc — the seam that today writes the result to a
-// local directory and later (a separate task, once nanokube-agent
-// exists) will dial --agent-addr and call the generated
-// desiredpb.AgentClient.PushDesired instead, without Reconcile itself
-// changing. See
+// outcome to a PushFunc — the seam that dials --agent-addr and calls the
+// generated desiredpb.AgentClient.PushDesired (NewGRPCPush, the
+// production default) or, for local dev without a running agent, writes
+// the result to a local directory instead (NewLocalPush). Reconcile
+// itself does not change between the two. See
 // docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md, 実装項目5.
 package operator
 
@@ -85,12 +85,12 @@ func readExistingMetadata(jsonPath string) (m *desiredpb.DesiredMetadata, ok boo
 // the build was skipped); rawPath is the confext DDI blob's local path
 // and may not exist -- implementations must check before reading it.
 //
-// The Step 1 skeleton's only implementation, NewLocalPush, writes meta
-// to a local directory and logs what it would have pushed, instead of
-// making a network call. A later task (once nanokube-agent exists)
-// swaps in a PushFunc that dials --agent-addr and calls
-// desiredpb.AgentClient.PushDesired with meta and rawPath's bytes --
-// Reconciler.Reconcile does not need to change for that swap.
+// NewGRPCPush is the production implementation: it dials --agent-addr
+// and calls desiredpb.AgentClient.PushDesired with meta and rawPath's
+// bytes. NewLocalPush is the Step 1 stand-in kept around for local dev
+// without a running agent: it writes meta to a local directory and logs
+// what it would have pushed, instead of making a network call.
+// Reconciler.Reconcile does not need to change between the two.
 type PushFunc func(ctx context.Context, meta *desiredpb.DesiredMetadata, rawPath string) error
 
 // NewLocalPush returns the Step 1 stand-in PushFunc: it protojson-marshals

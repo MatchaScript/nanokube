@@ -60,4 +60,12 @@ spec:
             - --configmap-name=nanokube-desired-input
             - --configmap-namespace=default
             - --output-dir=/var/lib/nanokube-operator/pushed
-            - --agent-addr=127.0.0.1:9090
+            # 169.254.1.2 is this dev host's rootless-podman pasta uplink
+            # address, reachable from inside a pod on Kind's podman
+            # provider without hostNetwork (confirmed empirically: it's
+            # the same address /etc/hosts' host.containers.internal
+            # resolves to on containers sharing the "kind" bridge
+            # network). On a different host/provider this needs
+            # rediscovering -- see internal/operator's real-push task
+            # report for how.
+            - --agent-addr=169.254.1.2:9090
