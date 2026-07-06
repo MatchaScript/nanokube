@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"google.golang.org/protobuf/encoding/protojson"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -198,10 +197,12 @@ func TestReconcile_IdempotentOnUnchangedInput(t *testing.T) {
 		ConfigMapName:      testName,
 		ConfigMapNamespace: testNamespace,
 		OutputDir:          outputDir,
-		// The idempotency check reads the sidecar NewLocalPush writes,
-		// so this test exercises the real stand-in rather than the
-		// recordingPush stub, to actually drive the on-disk state the
-		// second reconcile is supposed to notice.
+		// Reconcile itself writes the sidecar the idempotency check
+		// reads (NewLocalPush no longer does, see
+		// TestNewLocalPush_DoesNotWriteSidecar), so this test exercises
+		// the real stand-in -- which never touches outputDir -- to prove
+		// the on-disk state a second reconcile relies on comes from
+		// Reconcile, not from whichever PushFunc happens to be wired in.
 		Push: NewLocalPush(outputDir, "127.0.0.1:9090"),
 	}
 
@@ -317,7 +318,17 @@ func TestReconcile_ReusesExistingBlobWithoutRebuilding(t *testing.T) {
 	}
 }
 
-func TestNewLocalPush_WritesProtojsonSidecar(t *testing.T) {
+// TestNewLocalPush_DoesNotWriteSidecar replaces the former
+// TestNewLocalPush_WritesProtojsonSidecar: NewLocalPush used to
+// protojson-marshal meta to <name>.json as an incidental side effect of
+// standing in for a real push, which is exactly what made
+// readExistingMetadata's up-to-date check silently depend on which
+// PushFunc happened to be wired in (NewGRPCPush never wrote it, so under
+// --push-mode=grpc the check never fired). Now that Reconcile owns
+// writing that sidecar itself, NewLocalPush must NOT also write it --
+// this test locks in that contract so the duplicate side effect can't
+// creep back in.
+func TestNewLocalPush_DoesNotWriteSidecar(t *testing.T) {
 	outputDir := t.TempDir()
 	push := NewLocalPush(outputDir, "127.0.0.1:9090")
 
@@ -331,16 +342,112 @@ func TestNewLocalPush_WritesProtojsonSidecar(t *testing.T) {
 		t.Fatalf("push: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(outputDir, "abc123.json"))
-	if err != nil {
-		t.Fatalf("read sidecar: %v", err)
+	if _, err := os.Stat(filepath.Join(outputDir, "abc123.json")); !os.IsNotExist(err) {
+		t.Fatalf("stat sidecar after NewLocalPush: err = %v, want a not-exist error (NewLocalPush must not write it)", err)
 	}
-	var got desiredpb.DesiredMetadata
-	if err := protojson.Unmarshal(data, &got); err != nil {
-		t.Fatalf("protojson.Unmarshal: %v", err)
+}
+
+// TestReconcile_IdempotentAcrossPushModes is the regression guard for the
+// actual bug this task fixes: recordingPush, like the real NewGRPCPush
+// (production's default PushFunc) and unlike the old NewLocalPush, never
+// writes anything to outputDir on its own. Before Reconcile wrote the
+// sidecar itself, readExistingMetadata never found one under this
+// PushFunc, so the up-to-date check could never fire and every reconcile
+// -- including a true no-op repeat -- re-built and re-pushed. Asserting
+// the call count stays at 1 across two reconciles of the same input
+// proves that gap is closed regardless of which PushFunc is wired in.
+func TestReconcile_IdempotentAcrossPushModes(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
-	if got.Name != meta.Name || got.TargetImageDigest != meta.TargetImageDigest || got.BlobSha256 != meta.BlobSha256 {
-		t.Errorf("roundtripped sidecar = %+v, want %+v", &got, meta)
+	push := &recordingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          t.TempDir(),
+		Push:               push.fn(),
+	}
+
+	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Reconcile (1st): %v", err)
+	}
+	if len(push.calls) != 1 {
+		t.Fatalf("push called %d times after 1st reconcile, want 1", len(push.calls))
+	}
+
+	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Reconcile (2nd, unchanged input): %v", err)
+	}
+	if len(push.calls) != 1 {
+		t.Errorf("push called %d times after 2nd reconcile with unchanged input, want still 1 (a true no-op repeat must be skipped, not re-pushed)", len(push.calls))
+	}
+}
+
+// failingPush is a PushFunc stub that always fails and records how many
+// times it was called, standing in for a push that never reaches the
+// agent (e.g. it is unreachable) or that the agent rejects (e.g. a
+// checksum mismatch).
+type failingPush struct {
+	calls int
+}
+
+func (p *failingPush) fn() PushFunc {
+	return func(context.Context, *desiredpb.DesiredMetadata, string) error {
+		p.calls++
+		return errors.New("simulated push failure")
+	}
+}
+
+// TestReconcile_DoesNotWriteSidecarOnPushFailure is the failure-ordering
+// safety property Reconcile must uphold: writing the idempotency sidecar
+// before Push has actually succeeded would make a future reconcile
+// wrongly believe a failed push already completed, and then skip
+// retrying it forever -- a worse bug than the one this task fixes. It
+// reconciles once with a Push that always fails (asserting no sidecar
+// lands on disk afterwards), then swaps in a Push that succeeds and
+// reconciles again with the *same* input, asserting that second
+// reconcile still actually calls Push rather than being incorrectly
+// skipped as "already up to date".
+func TestReconcile_DoesNotWriteSidecarOnPushFailure(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+		Data:       map[string]string{TargetImageDigestKey: testDigest1},
+	}
+	outputDir := t.TempDir()
+	failing := &failingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          outputDir,
+		Push:               failing.fn(),
+	}
+
+	if _, err := r.Reconcile(context.Background(), testRequest()); err == nil {
+		t.Fatal("Reconcile: want an error from a failing push, got nil")
+	}
+	if failing.calls != 1 {
+		t.Fatalf("failing push called %d times, want 1", failing.calls)
+	}
+	name := renderedName(t)
+	jsonPath := filepath.Join(outputDir, name+".json")
+	if _, err := os.Stat(jsonPath); !os.IsNotExist(err) {
+		t.Fatalf("stat sidecar after a failed push: err = %v, want a not-exist error -- a failed push must never be recorded as done", err)
+	}
+
+	// A subsequent reconcile of the SAME input (e.g. controller-runtime's
+	// retry, or a later resync before anything changed) must actually
+	// retry the push, not be wrongly skipped as a no-op because of a
+	// sidecar the failed attempt should never have written.
+	retrying := &recordingPush{}
+	r.Push = retrying.fn()
+	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Reconcile (retry after failure): %v", err)
+	}
+	if len(retrying.calls) != 1 {
+		t.Fatalf("push called %d times on retry, want 1 (must not have been skipped as a no-op)", len(retrying.calls))
 	}
 }
 
