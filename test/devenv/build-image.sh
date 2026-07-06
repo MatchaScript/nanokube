@@ -10,10 +10,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-STATE_DIR="/var/tmp/nanokube-devenv"
+STATE_DIR="${STATE_DIR:-/var/tmp/nanokube-devenv}"
 SSH_DIR="${STATE_DIR}/ssh"
-IMAGE_TAG="localhost/nanokube-devenv:latest"
-REGISTRY_TAG="localhost:5000/nanokube-devenv:latest"
+IMAGE_TAG="${IMAGE_TAG:-localhost/nanokube-devenv:latest}"
+REGISTRY_TAG="${REGISTRY_TAG:-localhost:5000/nanokube-devenv:latest}"
 AGENT_BIN_DIR="${SCRIPT_DIR}/image/bin"
 PROTOC_DIR="${STATE_DIR}/tools/protoc"
 PROTOC_VERSION="35.1"
