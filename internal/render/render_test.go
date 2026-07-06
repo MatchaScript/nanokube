@@ -49,13 +49,13 @@ func TestKubeletConfig_Determinism(t *testing.T) {
 	}
 }
 
-func TestDesired_Name_SensitiveToImageDigest(t *testing.T) {
+func TestDesired_Name_InsensitiveToImageDigest(t *testing.T) {
 	files := []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("same content")}}
 	a := Desired{ImageDigest: "sha256:aaa", Files: files}
 	b := Desired{ImageDigest: "sha256:bbb", Files: files}
 
-	if a.Name() == b.Name() {
-		t.Fatalf("Name() unchanged after ImageDigest change: both %q", a.Name())
+	if a.Name() != b.Name() {
+		t.Fatalf("Name() changed after ImageDigest-only change: %q vs %q", a.Name(), b.Name())
 	}
 }
 
