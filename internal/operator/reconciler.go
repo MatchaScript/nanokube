@@ -4,9 +4,12 @@
 // build a confext DDI from the result (internal/ddi), then hand the
 // outcome to a PushFunc — the seam that dials --agent-addr and calls the
 // generated desiredpb.AgentClient.PushDesired (NewGRPCPush, the
-// production default) or, for local dev without a running agent, writes
-// the result to a local directory instead (NewLocalPush). Reconcile
-// itself does not change between the two. See
+// production default) or, for local dev without a running agent, just
+// logs what it would have pushed instead (NewLocalPush). Reconcile
+// itself does not change between the two, and it -- not either
+// PushFunc -- owns writing the <name>.json sidecar the idempotency check
+// below relies on, so that check means the same thing regardless of
+// which PushFunc is wired in. See
 // docs/nanokube/2026-07-06-step1-implementation-plan-rev5.md, 実装項目5.
 package operator
 
@@ -84,33 +87,31 @@ func readExistingMetadata(jsonPath string) (m *desiredpb.DesiredMetadata, ok boo
 // somewhere. meta is always populated (with a sentinel BlobSha256 when
 // the build was skipped); rawPath is the confext DDI blob's local path
 // and may not exist -- implementations must check before reading it.
+// Implementations are not responsible for recording that the push
+// happened -- Reconcile does that itself (see the <name>.json sidecar
+// write at the end of Reconcile) -- so a PushFunc need only attempt the
+// delivery and report success or failure.
 //
 // NewGRPCPush is the production implementation: it dials --agent-addr
 // and calls desiredpb.AgentClient.PushDesired with meta and rawPath's
 // bytes. NewLocalPush is the Step 1 stand-in kept around for local dev
-// without a running agent: it writes meta to a local directory and logs
-// what it would have pushed, instead of making a network call.
+// without a running agent: it just logs what it would have pushed and to
+// which agent address, instead of making a network call.
 // Reconciler.Reconcile does not need to change between the two.
 type PushFunc func(ctx context.Context, meta *desiredpb.DesiredMetadata, rawPath string) error
 
-// NewLocalPush returns the Step 1 stand-in PushFunc: it protojson-marshals
-// meta (same MarshalOptions contract/fixtures/gen uses, so the sidecar
-// format matches the golden fixtures) to <name>.json under outputDir and
-// logs what it would have pushed and to which agent address, without
-// dialing anything. agentAddr is documentation-only here -- see the
-// package doc comment.
+// NewLocalPush returns the Step 1 stand-in PushFunc: instead of dialing
+// anything, it just logs what it would have pushed and to which agent
+// address. agentAddr is documentation-only here -- see the package doc
+// comment. outputDir is likewise documentation-only: it names the
+// directory this stand-in would have written to, which in practice is
+// the same Reconciler.OutputDir that Reconcile itself already writes
+// <name>.raw and (after a successful push) <name>.json into, regardless
+// of which PushFunc is wired in.
 func NewLocalPush(outputDir, agentAddr string) PushFunc {
 	return func(ctx context.Context, meta *desiredpb.DesiredMetadata, rawPath string) error {
-		data, err := (protojson.MarshalOptions{Multiline: true, Indent: "  "}).Marshal(meta)
-		if err != nil {
-			return fmt.Errorf("operator: marshal metadata: %w", err)
-		}
-		jsonPath := filepath.Join(outputDir, meta.Name+".json")
-		if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
-			return fmt.Errorf("operator: write %s: %w", jsonPath, err)
-		}
-		log.FromContext(ctx).Info("would push to agent (Step 1 stand-in: local write only, no network call made)",
-			"agentAddr", agentAddr, "name", meta.Name, "rawPath", rawPath, "jsonPath", jsonPath)
+		log.FromContext(ctx).Info("would push to agent (Step 1 stand-in: no network call made)",
+			"agentAddr", agentAddr, "outputDir", outputDir, "name", meta.Name, "rawPath", rawPath)
 		return nil
 	}
 }
@@ -141,9 +142,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // Reconcile implements the one-cycle loop 実装項目5 of the implementation
 // plan asks for: detect input change -> render -> attempt build -> push
-// (today: local-write stand-in) -> done. Every step after render/build
-// depends on the previous one having succeeded; Reconcile returns (and
-// controller-runtime retries) on the first unexpected error.
+// -> record that the push succeeded -> done. Every step after
+// render/build depends on the previous one having succeeded; Reconcile
+// returns (and controller-runtime retries) on the first unexpected
+// error. In particular, the <name>.json sidecar readExistingMetadata
+// checks is written by Reconcile itself, only after r.Push returns nil
+// -- never before, and never by a PushFunc -- so the idempotency check
+// means the same thing under every PushFunc, and a failed push is never
+// mistaken for a completed one on the next reconcile.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -256,6 +262,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	if err := r.Push(ctx, meta, rawPath); err != nil {
 		return ctrl.Result{}, fmt.Errorf("operator: push: %w", err)
+	}
+
+	// Only now that Push has actually succeeded is it safe to record it:
+	// writing the sidecar any earlier (or unconditionally, regardless of
+	// Push's outcome) would make a future reconcile believe a failed push
+	// already succeeded and wrongly skip retrying it -- a correctness bug
+	// worse than the idempotency gap this sidecar-write closes. Same
+	// MarshalOptions contract/fixtures/gen uses, so the sidecar format
+	// matches the golden fixtures.
+	data, err := (protojson.MarshalOptions{Multiline: true, Indent: "  "}).Marshal(meta)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: marshal metadata: %w", err)
+	}
+	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
+		return ctrl.Result{}, fmt.Errorf("operator: write %s: %w", jsonPath, err)
 	}
 
 	return ctrl.Result{}, nil
