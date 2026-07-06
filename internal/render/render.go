@@ -45,16 +45,22 @@ type Desired struct {
 	Files       []File
 }
 
-// Name returns a deterministic identifier derived from d's content:
-// sha256 over ImageDigest and every (Path, Content) pair, sorted by
-// Path so field order never matters, hex-encoded. Equal input always
-// yields the same Name; changing ImageDigest or any file's path or
-// content always yields a different one. The result is lowercase
-// alnum only, a valid systemd extension/confext version name, and
-// doubles as the bookkeeping key for later stages.
+// Name returns a deterministic identifier derived from d's rendered
+// files only: sha256 over every (Path, Content) pair, sorted by Path
+// so field order never matters, hex-encoded. Equal input always
+// yields the same Name; changing any file's path or content always
+// yields a different one. The result is lowercase alnum only, a valid
+// systemd extension/confext version name, and doubles as the
+// bookkeeping key for later stages — including the trigger for
+// rebuilding the confext DDI itself.
+//
+// Name is intentionally insensitive to ImageDigest: a pure OS image
+// update (digest changes, rendered config files don't) must not force
+// a pointless DDI rebuild, so the digest is excluded from the hash
+// even though it remains part of the Desired document and is applied
+// atomically alongside the files.
 func (d Desired) Name() string {
 	h := sha256.New()
-	writeChunk(h, []byte(d.ImageDigest))
 
 	files := append([]File(nil), d.Files...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
