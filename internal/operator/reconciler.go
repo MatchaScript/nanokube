@@ -41,10 +41,19 @@ import (
 // real CRD + northbound API; see the architecture doc's "CRD" section).
 const TargetImageDigestKey = "targetImageDigest"
 
-// extensionReleaseID is the confext extension-release ID ddi.Build
-// writes, matching the literal contract/fixtures/gen uses for the same field —
-// duplicated rather than shared because gen is out of scope for this
-// task and the two call sites have no other reason to be coupled.
+// CRISocketKey is the ConfigMap Data key the reconciler reads to override
+// cfg.NodeRegistration.CRISocket before rendering the kubelet config —
+// the Step 1 stand-in for a real kubelet config parameter input (実装項目
+// 6.a). Absent or empty leaves cfg untouched, so it renders with
+// kubeadm's own default (DefaultedStaticInitConfiguration already sets
+// kubeadmconstants.DefaultCRISocket) exactly as before this key existed.
+const CRISocketKey = "criSocket"
+
+// extensionReleaseID is passed to ddi.Build for historical reasons but no
+// longer affects the built DDI: ddi.Build now always writes ID=_any
+// (see internal/ddi.extensionReleaseContent's doc comment for why).
+// Kept only so this call site matches contract/fixtures/gen's, which is
+// out of scope to change here.
 const extensionReleaseID = "fedora"
 
 // buildSkippedSentinel is written as DesiredMetadata.BlobSha256 when
@@ -183,6 +192,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("operator: DefaultedStaticInitConfiguration: %w", err)
+	}
+	if criSocket := cm.Data[CRISocketKey]; criSocket != "" {
+		cfg.NodeRegistration.CRISocket = criSocket
 	}
 	kubeletFile, err := render.KubeletConfig(cfg)
 	if err != nil {

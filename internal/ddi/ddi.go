@@ -34,9 +34,14 @@ type BuildInput struct {
 	// It becomes the extension-release filename suffix.
 	Name string
 
-	// ExtensionReleaseID is written as ID=<value> in the confext's
-	// extension-release file, matched against the host's /etc/os-release
-	// ID at merge time (systemd-confext refresh).
+	// ExtensionReleaseID no longer affects the built DDI: every
+	// nanokube confext's extension-release file unconditionally declares
+	// ID=_any (see extensionReleaseContent), opting out of
+	// systemd-confext's host ID/version matching entirely rather than
+	// asserting a specific host ID to match against. The field is kept,
+	// and callers may keep passing a value, purely so existing call
+	// sites outside this package's own tests don't need to change; the
+	// value itself is ignored by Build.
 	ExtensionReleaseID string
 
 	// Files are the confext-tree-relative files to bake in (e.g. from
@@ -74,7 +79,7 @@ func Build(input BuildInput, outputPath string) error {
 
 	release := render.File{
 		Path:    filepath.Join(extensionReleaseDir, "extension-release."+input.Name),
-		Content: []byte("ID=" + input.ExtensionReleaseID + "\n"),
+		Content: []byte(extensionReleaseContent),
 	}
 	if err := writeTreeFile(tree, release); err != nil {
 		return err
@@ -105,6 +110,53 @@ func Build(input BuildInput, outputPath string) error {
 	}
 	return nil
 }
+
+// extensionReleaseContent is the confext extension-release file content
+// written for every nanokube confext DDI, verbatim and unconditionally.
+//
+// ID=_any is a documented systemd convention: it tells systemd-confext
+// this one extension declares no host affinity at all, so ID and
+// VERSION_ID/SYSEXT_LEVEL matching are skipped entirely for it, without
+// affecting matching for any other sysext/confext a real host might
+// carry. Confirmed empirically against a real Fedora bootc host
+// (systemd 259): `systemd-confext refresh --mutable=yes` (no --force)
+// accepts an ID=_any extension outright ("Extension '...' matches '_any'
+// OS."), where an extension-release carrying only ID=<host-id> (no
+// version field) is instead rejected once the host's own /etc/os-release
+// declares a VERSION_ID.
+//
+// This project deliberately chose ID=_any over the alternative of
+// passing --force to `systemd-confext refresh` (tried and reverted; see
+// agent/src/ops.rs's refresh doc history), for three reasons:
+//
+//  1. --force would have to apply at boot time too. The automatic
+//     re-merge on every boot (systemd-confext.service) runs plain
+//     `refresh`, with no flags, and is not something nanokube's agent
+//     controls -- an --force-only fix would mean delivered config
+//     silently vanishing on every reboot. ID=_any needs no such
+//     accommodation: the opt-out is baked into the extension file
+//     itself, so systemd-confext.service's own unmodified `refresh`
+//     accepts it exactly the same way an agent-triggered one does.
+//
+//  2. Host os-release version matching is structurally at odds with
+//     nanokube's update-ordering design: config is applied and
+//     merge-verified BEFORE a reboot completes an image update, so at
+//     refresh time the OLD image's os-release is still the live one --
+//     matching against it does not verify compatibility with the NEW
+//     (staged, not-yet-booted) image the config is meant for. The check
+//     is checking the wrong thing at the wrong time for this
+//     architecture's ordering.
+//
+//  3. nanokube already has stronger, purpose-built correctness
+//     guarantees than systemd's generic ID/version matching: the
+//     agent's own bookkeeping (expectedDigest <-> desiredName pairing),
+//     render.Desired.Name()'s manifest-hash-based content identity, and
+//     the single-writer invariant (only the agent ever writes to
+//     /var/lib/confexts). systemd's ID/version check is redundant for
+//     this architecture and actively conflicts with its update-ordering
+//     model -- opting out via ID=_any is a deliberate, informed choice,
+//     not a shortcut.
+const extensionReleaseContent = "ID=_any\n"
 
 // writeTreeFile writes f under tree, creating parent directories as
 // needed and defaulting to mode 0o644 when f.Mode is unset.

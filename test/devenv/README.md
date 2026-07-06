@@ -265,6 +265,77 @@ than blocking `boot-vm.sh` forever.
   inside a Kind pod on this host, only this address does. The test cluster
   and pod were deleted afterward (`kind delete cluster`).
 
+## Verified on this VM (2026-07-06): confext ID=_any fix, 実装項目6.b/c closed for real
+
+A real-machine test run (`internal/ddi.Build` genuinely writing a version field into
+every confext's extension-release, then working around the resulting rejection with
+`systemd-confext refresh --force`) found `--force` unacceptable on review: it also
+disables ID/version matching for `systemd-confext.service`'s unmodified automatic
+re-merge on every boot (not agent-controlled), so config would silently vanish on
+reboot even though the agent-triggered refresh "worked". `internal/ddi.Build` now
+writes `ID=_any` into every confext's extension-release file instead -- a documented
+systemd convention meaning "skip ID and version matching entirely for this one
+extension" -- which needs no boot-time accommodation (the opt-out lives in the
+extension file itself) and matches nanokube's own update-ordering design better than
+host os-release version matching ever could (see `internal/ddi/ddi.go`'s
+`extensionReleaseContent` doc comment for the full three-part rationale). `--force`
+was reverted from `agent/src/ops.rs`'s `refresh()`, and the `SYSEXT_LEVEL=1`
+`/usr/lib/os-release` addition was reverted from this Containerfile.
+
+This closes 実装項目6.b/c through a genuinely unmodified agent binary: `grep -a -c --
+'--force' /usr/local/bin/nanokube-agent` == 0, both on the on-disk binary and on
+`/proc/1119/exe` (the actually-running process), confirms the compiled binary itself
+predates the `--force`/`SYSEXT_LEVEL` back-and-forth. This is a *binary-content* claim,
+not a process-continuity one -- see the reboot note below for why that distinction
+matters here. Only the *operator* was rebuilt with the `ID=_any` fix, redeployed to a
+fresh Kind cluster, and
+given a ConfigMap update with a new `criSocket`/`targetImageDigest` pair (an image
+pushed to this VM's registry under tag `task23`, digest
+`sha256:6068319cc0296b4b06182b4ccd787d50ea8443e16f43433c4f2f1a08004dc4cc`) -- distinct
+from anything pushed by earlier tasks, so this cycle's evidence is unambiguous:
+
+- `kubectl logs`: real `ddi.Build` ran (`built confext DDI ... bytes=1077248`, not the
+  `build-skipped` sentinel), then `pushed to agent` over real gRPC.
+- `journalctl -u nanokube-agent` on the guest: clean end to end, no
+  checksum-mismatch/refresh-failure of any kind.
+- `systemd-confext status` lists the new extension
+  (`51fceb33e300692250d3271520d91f7b42a5bd1b3cba97503b952c74c0120139`) merged into
+  `/etc`, and `/etc/kubernetes/kubelet-config.yaml` shows
+  `containerRuntimeEndpoint: unix:///var/run/crio/crio-task23.sock` -- the exact
+  `criSocket` value just pushed.
+- `bootc status` staged digest is exactly the pushed target digest above; the guest's
+  own registry view resolved it before the switch was attempted.
+- Bookkeeping (`/var/lib/nanokube/state/agent-bookkeeping.json`) records `desiredName`
+  correctly; `expectedDigest` reads back empty -- traced to pre-existing,
+  untouched `agent/src/pipeline.rs` logic (the post-switch bookkeeping-clear check
+  uses the single `bootc_status` call made *before* `bootc_switch`, so a switch
+  performed in the same cycle that started from "nothing staged" clears
+  `expected_digest` immediately rather than leaving it set until the staged
+  deployment is actually booted). Out of this task's scope (`pipeline.rs` was not
+  touched); noted here for whoever picks it up next.
+
+The Kind cluster and locally-built operator test images were deleted afterward; the
+`task23`-tagged image was left in this VM's registry and the resulting staged bootc
+deployment / merged `/etc` state were left in place on the guest, as the real,
+honest record of this run.
+
+**Correction, found by review**: this task did *not* reboot or rebuild the guest, but
+the guest *did* reboot partway through, for reasons outside this task -- `wtmp` shows
+a real in-guest reboot at 2026-07-06T13:27:12Z (a prior, unknown task/session had
+rebuilt the image with the (now-reverted) `SYSEXT_LEVEL=1` os-release line, switched to
+it, and rebooted to test it; that test found `SYSEXT_LEVEL` alone, without `--force`,
+does not survive the automatic boot-time re-merge either -- unplanned corroboration of
+this section's design point (a)). The qemu *host* process (`qemu.pid` 447283) ran
+continuously throughout and was never restarted, but the *guest OS* was not
+"unchanged": `nanokube-agent`'s `MainPID` 1119 is itself a post-reboot process, born at
+that 13:27:12 boot, running inside whichever image was staged at the time (the
+`SYSEXT_LEVEL` one). Because the reboot swapped the running image out from under this
+task, process continuity (uptime, `MainPID` age) cannot be trusted as proof of "this is
+the pre-`--force` binary" -- that's exactly why this section verifies by grepping the
+actual bytes of the binary on disk and of the live `/proc/1119/exe`, rather than by
+process/uptime continuity. That direct-content check is unaffected by the reboot and is
+what the 実装項目6.b/c closure above actually rests on.
+
 ## Runtime state (not in git)
 
 All under `/var/tmp/nanokube-devenv/`:

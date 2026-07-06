@@ -74,6 +74,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     lvm2 \
     systemd-networkd \
     fastfetch \
+    jq \
     systemd-resolved \
     greenboot \
     greenboot-default-health-checks && \
