@@ -38,3 +38,27 @@ message DesiredMetadata {
   string target_image_digest = 2;
   string blob_sha256 = 3;
 }
+
+// PushDesiredResponse acknowledges a PushDesired call. Failure (blob
+// sha256 mismatch, confext placement/refresh failure, etc.) surfaces as
+// a gRPC error status, not a field here — this message only confirms
+// success and echoes back which document was applied.
+message PushDesiredResponse {
+  // desired_name echoes back Desired.name from the request, confirming
+  // which version this acknowledgment refers to (useful when responses
+  // and requests could otherwise be re-ordered/pipelined).
+  string desired_name = 1;
+}
+
+// Agent is the gRPC service nanokube-agent exposes. The operator (in
+// steady state) or the CLI (bootstrap/break-glass) is the client; the
+// agent never initiates contact. Step 1 runs this dev-grade (plaintext
+// or self-signed) — mTLS/PKI hardening is Step 5.
+service Agent {
+  // PushDesired delivers a new desired document for the agent to apply:
+  // blob sha256 verification, confext placement + refresh, bookkeeping,
+  // then bootc stage, in that order (see internal/ddi and the agent's
+  // own apply pipeline). Idempotent: pushing a Desired whose name matches
+  // what's already applied is a no-op success.
+  rpc PushDesired(Desired) returns (PushDesiredResponse);
+}
