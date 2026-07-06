@@ -44,6 +44,35 @@ jobs:
         run: go test -race -count=1 -timeout=3m ./...
 
   # ---------------------------------------------------------------------------
+  # Rust agent (Local lane). Fast; every PR runs this.
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust agent
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # ---------------------------------------------------------------------------
   # E2E suite — installs CRI-O, kubelet, kubectl on the runner via
   # test/e2e/setup.sh, then drives the full init → boot → workload →
   # reset lifecycle as a Go testify suite. Slow (~10 min) and needs sudo,
