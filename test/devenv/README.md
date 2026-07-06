@@ -282,11 +282,13 @@ host os-release version matching ever could (see `internal/ddi/ddi.go`'s
 was reverted from `agent/src/ops.rs`'s `refresh()`, and the `SYSEXT_LEVEL=1`
 `/usr/lib/os-release` addition was reverted from this Containerfile.
 
-This closes 実装項目6.b/c for the first time through a genuinely unmodified agent
-process: the `nanokube-agent` binary already running on this VM (PID 1119, started
-2026-07-06T13:27:16Z, confirmed via `grep -a -c -- '--force' /usr/local/bin/nanokube-agent`
-== 0) predates every bit of this `--force`/`SYSEXT_LEVEL` back-and-forth. Only the
-*operator* was rebuilt with the `ID=_any` fix, redeployed to a fresh Kind cluster, and
+This closes 実装項目6.b/c through a genuinely unmodified agent binary: `grep -a -c --
+'--force' /usr/local/bin/nanokube-agent` == 0, both on the on-disk binary and on
+`/proc/1119/exe` (the actually-running process), confirms the compiled binary itself
+predates the `--force`/`SYSEXT_LEVEL` back-and-forth. This is a *binary-content* claim,
+not a process-continuity one -- see the reboot note below for why that distinction
+matters here. Only the *operator* was rebuilt with the `ID=_any` fix, redeployed to a
+fresh Kind cluster, and
 given a ConfigMap update with a new `criSocket`/`targetImageDigest` pair (an image
 pushed to this VM's registry under tag `task23`, digest
 `sha256:6068319cc0296b4b06182b4ccd787d50ea8443e16f43433c4f2f1a08004dc4cc`) -- distinct
@@ -315,8 +317,24 @@ from anything pushed by earlier tasks, so this cycle's evidence is unambiguous:
 The Kind cluster and locally-built operator test images were deleted afterward; the
 `task23`-tagged image was left in this VM's registry and the resulting staged bootc
 deployment / merged `/etc` state were left in place on the guest, as the real,
-honest record of this run (the guest itself was never rebooted or rebuilt for this
-task -- `qemu.pid` 447283 and the agent's `MainPID` 1119 were unchanged throughout).
+honest record of this run.
+
+**Correction, found by review**: this task did *not* reboot or rebuild the guest, but
+the guest *did* reboot partway through, for reasons outside this task -- `wtmp` shows
+a real in-guest reboot at 2026-07-06T13:27:12Z (a prior, unknown task/session had
+rebuilt the image with the (now-reverted) `SYSEXT_LEVEL=1` os-release line, switched to
+it, and rebooted to test it; that test found `SYSEXT_LEVEL` alone, without `--force`,
+does not survive the automatic boot-time re-merge either -- unplanned corroboration of
+this section's design point (a)). The qemu *host* process (`qemu.pid` 447283) ran
+continuously throughout and was never restarted, but the *guest OS* was not
+"unchanged": `nanokube-agent`'s `MainPID` 1119 is itself a post-reboot process, born at
+that 13:27:12 boot, running inside whichever image was staged at the time (the
+`SYSEXT_LEVEL` one). Because the reboot swapped the running image out from under this
+task, process continuity (uptime, `MainPID` age) cannot be trusted as proof of "this is
+the pre-`--force` binary" -- that's exactly why this section verifies by grepping the
+actual bytes of the binary on disk and of the live `/proc/1119/exe`, rather than by
+process/uptime continuity. That direct-content check is unaffected by the reboot and is
+what the 実装項目6.b/c closure above actually rests on.
 
 ## Runtime state (not in git)
 

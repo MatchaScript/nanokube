@@ -49,10 +49,11 @@ const TargetImageDigestKey = "targetImageDigest"
 // kubeadmconstants.DefaultCRISocket) exactly as before this key existed.
 const CRISocketKey = "criSocket"
 
-// extensionReleaseID is the confext extension-release ID ddi.Build
-// writes, matching the literal contract/fixtures/gen uses for the same field —
-// duplicated rather than shared because gen is out of scope for this
-// task and the two call sites have no other reason to be coupled.
+// extensionReleaseID is passed to ddi.Build for historical reasons but no
+// longer affects the built DDI: ddi.Build now always writes ID=_any
+// (see internal/ddi.extensionReleaseContent's doc comment for why).
+// Kept only so this call site matches contract/fixtures/gen's, which is
+// out of scope to change here.
 const extensionReleaseID = "fedora"
 
 // buildSkippedSentinel is written as DesiredMetadata.BlobSha256 when
