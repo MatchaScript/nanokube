@@ -160,9 +160,8 @@ func runBuild(manifestDir string) {
 
 	rawPath := filepath.Join(fixturesDir, name+".raw")
 	if err := ddi.Build(ddi.BuildInput{
-		Name:               name,
-		ExtensionReleaseID: "fedora",
-		Files:              desired.Files,
+		Name:  name,
+		Files: desired.Files,
 	}, rawPath); err != nil {
 		log.Fatalf("gen build: ddi.Build: %v", err)
 	}

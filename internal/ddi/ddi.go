@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,16 +34,6 @@ type BuildInput struct {
 	// Name is the confext version name (typically render.Desired.Name()).
 	// It becomes the extension-release filename suffix.
 	Name string
-
-	// ExtensionReleaseID no longer affects the built DDI: every
-	// nanokube confext's extension-release file unconditionally declares
-	// ID=_any (see extensionReleaseContent), opting out of
-	// systemd-confext's host ID/version matching entirely rather than
-	// asserting a specific host ID to match against. The field is kept,
-	// and callers may keep passing a value, purely so existing call
-	// sites outside this package's own tests don't need to change; the
-	// value itself is ignored by Build.
-	ExtensionReleaseID string
 
 	// Files are the confext-tree-relative files to bake in (e.g. from
 	// render.Desired.Files). Must not include an extension-release entry
@@ -85,6 +76,24 @@ func Build(input BuildInput, outputPath string) error {
 		return err
 	}
 
+	// MkdirAll's perms are umask-masked too; normalize every directory.
+	err = filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.Chmod(p, 0o755)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("ddi: normalize tree dir modes: %w", err)
+	}
+
+	if (input.PrivateKeyPath != "") != (input.CertificatePath != "") {
+		return fmt.Errorf("ddi: signing requires both PrivateKeyPath and CertificatePath, got only one (a silent unsigned build would break the all-generations-signed transition condition)")
+	}
+
 	signed := input.PrivateKeyPath != "" && input.CertificatePath != ""
 
 	var args []string
@@ -102,6 +111,15 @@ func Build(input BuildInput, outputPath string) error {
 	args = append(args, "--copy-source="+tree, outputPath)
 
 	cmd := exec.Command("systemd-repart", args...)
+	// The scratch tree carries the build environment's uid/gid and umask;
+	// none of that may leak into the image (rev6 "DDI ビルドの規定").
+	// --all-root forces uid/gid 0, -T 0 + SOURCE_DATE_EPOCH pin
+	// timestamps. Verified against systemd 259 + erofs-utils 1.9.1: without
+	// these the build uid is baked into every inode.
+	cmd.Env = append(os.Environ(),
+		"SYSTEMD_REPART_MKFS_OPTIONS_EROFS=--all-root -T 0",
+		"SOURCE_DATE_EPOCH=0",
+	)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -148,9 +166,8 @@ func Build(input BuildInput, outputPath string) error {
 //     architecture's ordering.
 //
 //  3. nanokube already has stronger, purpose-built correctness
-//     guarantees than systemd's generic ID/version matching: the
-//     agent's own bookkeeping (expectedDigest <-> desiredName pairing),
-//     render.Desired.Name()'s manifest-hash-based content identity, and
+//     guarantees than systemd's generic ID/version matching:
+//     render.Desired.Name()'s manifest-hash-based content identity and
 //     the single-writer invariant (only the agent ever writes to
 //     /var/lib/confexts). systemd's ID/version check is redundant for
 //     this architecture and actively conflicts with its update-ordering
@@ -171,6 +188,9 @@ func writeTreeFile(tree string, f render.File) error {
 	}
 	if err := os.WriteFile(path, f.Content, mode); err != nil {
 		return fmt.Errorf("ddi: write %s: %w", path, err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("ddi: chmod %s: %w", path, err)
 	}
 	return nil
 }
