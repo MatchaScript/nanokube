@@ -23,6 +23,35 @@ pub trait OpsProvider: Send + Sync {
     fn ops(&self) -> Box<dyn Ops + Send>;
 }
 
+/// Upper bound for a PushDesired message. Not transport tuning but a
+/// guardrail: the blob carries /etc config only (realistic ceiling
+/// 2-3MiB with signing + padding), so approaching this limit means
+/// something that belongs in the OS image (/usr) leaked into the
+/// confext. Widening this instead of fixing the leak is the wrong move.
+/// (rev6 "bootstrap・transport・below-cluster")
+pub const MAX_DESIRED_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// desired.name arrives over the network and becomes a path component
+/// (`/var/lib/confexts/<name>.raw`) and an extension-release filename;
+/// reject anything that could traverse or hide (path separators, dot
+/// prefixes, empty, oversized).
+fn validate_name(name: &str) -> Result<(), Status> {
+    let ok = !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(format!(
+            "invalid desired name {name:?}: must be non-empty, at most 255 chars, \
+             not start with '.', and contain only [A-Za-z0-9._-]"
+        )))
+    }
+}
+
 /// Hands out a [`RealOps`] backed by `confexts_dir`/`bookkeeping_path`,
 /// shelling out to the real `systemd-confext`/`bootc` binaries.
 pub struct RealOpsProvider {
@@ -52,12 +81,16 @@ impl OpsProvider for RealOpsProvider {
 /// TLS (mTLS/PKI hardening is Step 5).
 pub struct AgentService {
     ops_provider: Arc<dyn OpsProvider>,
+    /// Serializes apply() across concurrent PushDesired calls: place /
+    /// refresh / bootc switch on one node must not interleave.
+    apply_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentService {
     pub fn new(ops_provider: impl OpsProvider + 'static) -> Self {
         Self {
             ops_provider: Arc::new(ops_provider),
+            apply_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -69,6 +102,8 @@ impl agent_server::Agent for AgentService {
         request: Request<Desired>,
     ) -> Result<Response<PushDesiredResponse>, Status> {
         let desired = request.into_inner();
+        validate_name(&desired.name)?;
+        let _guard = self.apply_lock.lock().await;
         let metadata = DesiredMetadata {
             name: desired.name,
             target_image_digest: desired.target_image_digest,
@@ -99,6 +134,7 @@ fn to_status(err: ApplyError) -> Status {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use sha2::{Digest, Sha256};
     use tonic::Code;
@@ -169,6 +205,58 @@ mod tests {
         }
     }
 
+    /// Records only `place()`'s enter/exit markers around a 50ms sleep;
+    /// every other method is a no-op success. Used to prove
+    /// `push_desired` serializes concurrent calls: if apply() ran
+    /// concurrently, two overlapping pushes would interleave their
+    /// markers (enter, enter, exit, exit) instead of running back to
+    /// back.
+    #[derive(Clone, Default)]
+    struct SlowOpsProvider {
+        markers: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct SlowOps {
+        markers: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl OpsProvider for SlowOpsProvider {
+        fn ops(&self) -> Box<dyn Ops + Send> {
+            Box::new(SlowOps {
+                markers: Arc::clone(&self.markers),
+            })
+        }
+    }
+
+    impl Ops for SlowOps {
+        fn place(&mut self, _name: &str, _blob: &[u8]) -> Result<(), OpsError> {
+            self.markers.lock().unwrap().push("enter".to_string());
+            std::thread::sleep(Duration::from_millis(50));
+            self.markers.lock().unwrap().push("exit".to_string());
+            Ok(())
+        }
+
+        fn refresh(&mut self) -> Result<(), OpsError> {
+            Ok(())
+        }
+
+        fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
+            Ok(Bookkeeping::default())
+        }
+
+        fn write_bookkeeping(&mut self, _bk: &Bookkeeping) -> Result<(), OpsError> {
+            Ok(())
+        }
+
+        fn bootc_status(&mut self) -> Result<Option<BootcStatus>, OpsError> {
+            Ok(None)
+        }
+
+        fn bootc_switch(&mut self, _image_ref: &str) -> Result<(), OpsError> {
+            Ok(())
+        }
+    }
+
     fn sha256_hex(data: &[u8]) -> String {
         Sha256::digest(data)
             .iter()
@@ -230,5 +318,67 @@ mod tests {
             "expected no Ops calls, got {:?}",
             calls.lock().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn push_desired_rejects_path_traversal_names() {
+        for bad in ["", "..", "../etc", "a/b", ".hidden", &"x".repeat(256)] {
+            let provider = FakeOpsProvider::default();
+            let calls = Arc::clone(&provider.calls);
+            let service = AgentService::new(provider);
+            let blob = b"blob".to_vec();
+            let request = Request::new(Desired {
+                name: bad.to_string(),
+                target_image_digest: "sha256:T".to_string(),
+                blob_sha256: sha256_hex(&blob),
+                blob,
+            });
+            let status = service.push_desired(request).await.unwrap_err();
+            assert_eq!(status.code(), Code::InvalidArgument, "name {bad:?}");
+            assert!(
+                calls.lock().unwrap().is_empty(),
+                "expected no Ops calls for name {bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn push_desired_calls_are_serialized() {
+        // place() sleeps, so two overlapping pushes would interleave their
+        // enter/exit markers if apply ran concurrently.
+        let provider = SlowOpsProvider::default();
+        let markers = Arc::clone(&provider.markers);
+        let service = Arc::new(AgentService::new(provider));
+
+        let mut handles = Vec::new();
+        for i in 0..2 {
+            let service = Arc::clone(&service);
+            handles.push(tokio::spawn(async move {
+                let blob = format!("blob-{i}").into_bytes();
+                let request = Request::new(Desired {
+                    name: format!("name-{i}"),
+                    target_image_digest: "sha256:T".to_string(),
+                    blob_sha256: sha256_hex(&blob),
+                    blob,
+                });
+                service.push_desired(request).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let markers = markers.lock().unwrap();
+        assert_eq!(markers.len(), 4);
+        // Strictly enter,exit,enter,exit — never enter,enter.
+        assert_eq!(markers[0], "enter");
+        assert_eq!(markers[1], "exit");
+        assert_eq!(markers[2], "enter");
+        assert_eq!(markers[3], "exit");
+    }
+
+    #[test]
+    fn max_desired_message_bytes_is_16_mib() {
+        assert_eq!(MAX_DESIRED_MESSAGE_BYTES, 16 * 1024 * 1024);
     }
 }
