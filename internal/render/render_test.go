@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
@@ -114,5 +115,32 @@ func TestKubeletConfig_ParityWithEnsureWorker(t *testing.T) {
 	}
 	if !bytes.Equal(got.Content, want) {
 		t.Errorf("KubeletConfig content differs from EnsureWorker's on-disk output:\ngot:  %s\nwant: %s", got.Content, want)
+	}
+}
+
+// TestKubeletConfigResolvConfIsExplicit guards against kubeadm's own
+// kubelet-config defaulting, which probes whether systemd-resolved is
+// active on the render host (a Kind container, not the node) and
+// bakes that answer into resolvConf. Nodes always run systemd-resolved
+// (homelab bootc images), so the value must be pinned explicitly and
+// must not depend on render-host state.
+func TestKubeletConfigResolvConfIsExplicit(t *testing.T) {
+	cfg := defaultedInit(t)
+	f, err := KubeletConfig(cfg)
+	if err != nil {
+		t.Fatalf("KubeletConfig: %v", err)
+	}
+	want := "resolvConf: /run/systemd/resolve/resolv.conf"
+	if !strings.Contains(string(f.Content), want) {
+		t.Errorf("rendered kubelet config must pin %q explicitly (render-host state must not leak); got:\n%s",
+			want, f.Content)
+	}
+}
+
+func TestNameChangesWhenOnlyModeChanges(t *testing.T) {
+	a := Desired{Files: []File{{Path: "etc/x", Content: []byte("c"), Mode: 0o644}}}
+	b := Desired{Files: []File{{Path: "etc/x", Content: []byte("c"), Mode: 0o600}}}
+	if a.Name() == b.Name() {
+		t.Error("Name() must change when only a file's Mode changes")
 	}
 }
