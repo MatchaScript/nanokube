@@ -52,6 +52,10 @@ type BuildInput struct {
 // is unprivileged; the caller is responsible for computing outputPath's
 // sha256 afterward if needed (Build doesn't duplicate that).
 func Build(input BuildInput, outputPath string) error {
+	if (input.PrivateKeyPath != "") != (input.CertificatePath != "") {
+		return fmt.Errorf("ddi: signing requires both PrivateKeyPath and CertificatePath, got only one (a silent unsigned build would break the all-generations-signed transition condition)")
+	}
+
 	if _, err := exec.LookPath("systemd-repart"); err != nil {
 		return ErrSystemdRepartNotFound
 	}
@@ -88,10 +92,6 @@ func Build(input BuildInput, outputPath string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("ddi: normalize tree dir modes: %w", err)
-	}
-
-	if (input.PrivateKeyPath != "") != (input.CertificatePath != "") {
-		return fmt.Errorf("ddi: signing requires both PrivateKeyPath and CertificatePath, got only one (a silent unsigned build would break the all-generations-signed transition condition)")
 	}
 
 	signed := input.PrivateKeyPath != "" && input.CertificatePath != ""

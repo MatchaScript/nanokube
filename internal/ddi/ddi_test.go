@@ -94,9 +94,15 @@ func TestBuildRejectsHalfConfiguredSigning(t *testing.T) {
 		{Name: "half", PrivateKeyPath: "/nonexistent/key.pem"},
 		{Name: "half", CertificatePath: "/nonexistent/cert.crt"},
 	} {
-		if err := Build(in, out); err == nil {
+		err := Build(in, out)
+		if err == nil {
 			t.Errorf("Build with half-configured signing (key=%q cert=%q): want error, got nil",
 				in.PrivateKeyPath, in.CertificatePath)
+			continue
+		}
+		if errors.Is(err, ErrSystemdRepartNotFound) {
+			t.Errorf("Build with half-configured signing (key=%q cert=%q): want input-validation error, got ErrSystemdRepartNotFound (validation must run before the tool-lookup, so this test isn't vacuous on tool-less hosts): %v",
+				in.PrivateKeyPath, in.CertificatePath, err)
 		}
 	}
 }

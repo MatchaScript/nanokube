@@ -45,9 +45,12 @@ fn validate_name(name: &str) -> Result<(), Status> {
     if ok {
         Ok(())
     } else {
+        let truncated: String = name.chars().take(64).collect();
         Err(Status::invalid_argument(format!(
-            "invalid desired name {name:?}: must be non-empty, at most 255 chars, \
-             not start with '.', and contain only [A-Za-z0-9._-]"
+            "invalid desired name {truncated:?} (len {}, showing first 64 chars): \
+             must be non-empty, at most 255 chars, \
+             not start with '.', and contain only [A-Za-z0-9._-]",
+            name.len()
         )))
     }
 }
