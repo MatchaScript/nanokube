@@ -18,10 +18,10 @@ import (
 
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
-	"k8s.io/utils/ptr"
+
+	nanokubeadm "github.com/MatchaScript/nanokube/internal/kubeadm"
 )
 
 // KubeletConfigPath is the confext-tree-relative location of the
@@ -29,14 +29,6 @@ import (
 // actually reads is decided by the image's kubelet drop-in (--config);
 // this package only owns the rendering, not the drop-in.
 const KubeletConfigPath = "etc/kubernetes/kubelet-config.yaml"
-
-// kubeletResolverConfig is pinned explicitly so the rendered bytes never
-// depend on the render host: kubeadm's own defaulting probes whether
-// systemd-resolved is active on the machine doing the rendering, which
-// is a Kind container here, not the node. Nodes run systemd-resolved
-// (homelab bootc images), so the resolved stub path is the correct
-// value for every node.
-const kubeletResolverConfig = "/run/systemd/resolve/resolv.conf"
 
 // File is one entry in a Desired document's file list. Path is
 // relative to the confext tree root, e.g.
@@ -119,23 +111,14 @@ func KubeletConfig(cfg *kubeadmapi.InitConfiguration) (File, error) {
 	// WriteInstanceConfigToDisk (above) only ever writes
 	// containerRuntimeEndpoint to instance-config.yaml — it silently
 	// drops every other field on the KubeletConfiguration passed to
-	// it, so setting ResolverConfig there does not propagate to the
-	// rendered output. Instead, pin it on the ClusterConfiguration's
-	// kubelet component config, which WriteConfigToDisk (below) does
-	// marshal: kubeadm's own componentconfigs.kubeletConfig.Mutate()
-	// only fills ResolverConfig from render-host systemd-resolved
-	// detection when it is nil, so setting it here first makes that
-	// detection a no-op.
-	kubeletCfg, ok := cfg.ClusterConfiguration.ComponentConfigs[componentconfigs.KubeletGroup]
-	if !ok {
-		return File{}, fmt.Errorf("render: no kubelet component config found in ClusterConfiguration")
+	// it, so ResolverConfig cannot be pinned there. Instead pin it on
+	// the ClusterConfiguration's kubelet component config, which
+	// WriteConfigToDisk (below) does marshal. The pin is shared with
+	// internal/kubeadm's ensureKubeletFiles so this render path and
+	// the transitional on-disk path stay byte-identical on any host.
+	if err := nanokubeadm.PinKubeletResolverConfig(&cfg.ClusterConfiguration); err != nil {
+		return File{}, fmt.Errorf("render: %w", err)
 	}
-	kubeletConfiguration, ok := kubeletCfg.Get().(*kubeletconfigv1beta1.KubeletConfiguration)
-	if !ok {
-		return File{}, fmt.Errorf("render: unexpected kubelet component config type %T", kubeletCfg.Get())
-	}
-	kubeletConfiguration.ResolverConfig = ptr.To(kubeletResolverConfig)
-	kubeletCfg.Set(kubeletConfiguration)
 
 	const patchesDir = ""
 	if err := kubelet.WriteConfigToDisk(&cfg.ClusterConfiguration, scratch, patchesDir, io.Discard); err != nil {
