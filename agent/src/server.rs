@@ -148,10 +148,10 @@ mod tests {
         }
 
         fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError> {
-            self.calls.lock().unwrap().push(format!(
-                "write_bookkeeping:{}:{}",
-                bk.desired_name, bk.expected_digest
-            ));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("write_bookkeeping:{}", bk.desired_name));
             Ok(())
         }
 
@@ -202,7 +202,7 @@ mod tests {
                 "read_bookkeeping".to_string(),
                 "place:v1-name".to_string(),
                 "refresh".to_string(),
-                "write_bookkeeping:v1-name:sha256:TARGET".to_string(),
+                "write_bookkeeping:v1-name".to_string(),
                 "bootc_status".to_string(),
             ]
         );

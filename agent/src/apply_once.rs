@@ -112,10 +112,8 @@ mod tests {
         }
 
         fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError> {
-            self.calls.push(format!(
-                "write_bookkeeping:{}:{}",
-                bk.desired_name, bk.expected_digest
-            ));
+            self.calls
+                .push(format!("write_bookkeeping:{}", bk.desired_name));
             Ok(())
         }
 
