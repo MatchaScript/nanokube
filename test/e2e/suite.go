@@ -20,7 +20,9 @@ import (
 const (
 	binPath    = "/usr/bin/nanokube"
 	kubeconfig = "/etc/kubernetes/admin.conf"
-	flannelURL = "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+	// Pinned (not /latest/): the latest redirect 404s whenever a release
+	// is cut without its assets uploaded yet, which broke CI (2026-07-07).
+	flannelURL = "https://github.com/flannel-io/flannel/releases/download/v0.28.7/kube-flannel.yml"
 )
 
 // NanokubeE2ESuite drives the full bootstrap → boot → workload → reset
