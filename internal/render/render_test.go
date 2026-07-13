@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,5 +190,123 @@ func TestKubeletFlagsEnv_ExtraArgsPassThrough(t *testing.T) {
 	want := `KUBELET_KUBEADM_ARGS="--hostname-override=test-node-0 --node-ip=10.0.0.5"` + "\n"
 	if string(f.Content) != want {
 		t.Errorf("Content = %q, want %q", f.Content, want)
+	}
+}
+
+func TestControlPlaneManifests_RendersFourStaticPods(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.0.2.10"
+
+	files, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatalf("ControlPlaneManifests: %v", err)
+	}
+	wantPaths := []string{
+		"etc/kubernetes/manifests/etcd.yaml",
+		"etc/kubernetes/manifests/kube-apiserver.yaml",
+		"etc/kubernetes/manifests/kube-controller-manager.yaml",
+		"etc/kubernetes/manifests/kube-scheduler.yaml",
+	}
+	var got []string
+	for _, f := range files {
+		got = append(got, f.Path)
+		if f.Mode != 0o644 {
+			t.Errorf("%s: Mode = %o, want 0644", f.Path, f.Mode)
+		}
+	}
+	if !slices.Equal(got, wantPaths) {
+		t.Errorf("paths = %v, want %v", got, wantPaths)
+	}
+	// Manifests must reference the NODE's pki path, not the scratch dir.
+	for _, f := range files {
+		if bytes.Contains(f.Content, []byte(os.TempDir())) {
+			t.Errorf("%s leaks scratch path", f.Path)
+		}
+	}
+	apiserver := files[1]
+	if !bytes.Contains(apiserver.Content, []byte("advertise-address=192.0.2.10")) {
+		t.Errorf("apiserver manifest missing advertise address from cfg")
+	}
+	if !bytes.Contains(apiserver.Content, []byte("/etc/kubernetes/pki")) {
+		t.Errorf("apiserver manifest must mount /etc/kubernetes/pki")
+	}
+}
+
+func TestControlPlaneManifests_Deterministic(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.0.2.10"
+
+	a, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Error("two renders of the same cfg differ (ambient leak?)")
+	}
+}
+
+// TestControlPlaneManifests_IgnoresRenderHostProxyEnv is a sentinel-swap
+// check for the ambient read this task pins away: kubeadm's
+// GetStaticPodSpecs, called with proxyEnvs=nil (as
+// CreateInitStaticPodManifestFiles always does), scans the render
+// process's os.Environ() for *_proxy variables and bakes them into the
+// apiserver/controller-manager/scheduler container Env. Flipping the
+// sentinel (setting HTTP_PROXY) must not change the rendered bytes.
+func TestControlPlaneManifests_IgnoresRenderHostProxyEnv(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.0.2.10"
+
+	before, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HTTP_PROXY", "http://proxy.example.invalid:3128")
+	t.Setenv("NO_PROXY", "example.invalid")
+
+	after, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Error("rendered manifests changed when the render process's proxy env vars changed (ambient leak)")
+	}
+	for _, f := range after {
+		if bytes.Contains(f.Content, []byte("proxy.example.invalid")) {
+			t.Errorf("%s: leaked the render host's HTTP_PROXY value into the manifest", f.Path)
+		}
+	}
+}
+
+// TestControlPlaneManifests_NoAmbientCACertMounts guards against
+// kubeadm's getHostPathVolumesForTheControlPlane, which os.Stat's a
+// fixed list of render-host paths (see ambientCACertMountPaths) and
+// conditionally mounts whichever exist. This dev host actually has two
+// of the five (/etc/pki/ca-trust, /etc/pki/tls/certs), so without
+// stripAmbientHostMounts this test would fail right here — it is not
+// merely a hypothetical.
+func TestControlPlaneManifests_NoAmbientCACertMounts(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.0.2.10"
+
+	files, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		for _, path := range ambientCACertMountPaths {
+			if bytes.Contains(f.Content, []byte(path)) {
+				t.Errorf("%s: contains ambient render-host mount %q (must be stripped)", f.Path, path)
+			}
+		}
+	}
+	// The always-present, non-ambient mount must survive.
+	apiserver := files[1]
+	if !bytes.Contains(apiserver.Content, []byte("/etc/ssl/certs")) {
+		t.Error("apiserver manifest missing the unconditional /etc/ssl/certs mount (over-stripped?)")
 	}
 }

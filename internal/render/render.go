@@ -16,10 +16,14 @@ import (
 	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/phases/controlplane"
+	"k8s.io/kubernetes/cmd/kubeadm/app/phases/etcd"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
+	staticpodutil "k8s.io/kubernetes/cmd/kubeadm/app/util/staticpod"
 
 	nanokubeadm "github.com/MatchaScript/nanokube/internal/kubeadm"
 )
@@ -35,6 +39,16 @@ const KubeletConfigPath = "etc/kubernetes/kubelet-config.yaml"
 // confext's /etc reach) to /etc/kubernetes; the kubelet drop-in's
 // EnvironmentFile= follows (devenv image overlay).
 const KubeletFlagsEnvPath = "etc/kubernetes/kubeadm-flags.env"
+
+// ManifestsPathPrefix is the confext-tree-relative directory the four
+// control-plane static pod manifests are rendered under.
+const ManifestsPathPrefix = "etc/kubernetes/manifests/"
+
+// nodePKIDir is the path the rendered manifests must reference for
+// PKI material: where certs land ON THE NODE once the confext tree is
+// merged, independent of where ControlPlaneManifests actually
+// generates them (a scratch directory).
+const nodePKIDir = "/etc/kubernetes/pki"
 
 // File is one entry in a Desired document's file list. Path is
 // relative to the confext tree root, e.g.
@@ -148,4 +162,142 @@ func KubeletFlagsEnv(cfg *kubeadmapi.InitConfiguration) File {
 	}
 	content := fmt.Sprintf("%s=%q\n", "KUBELET_KUBEADM_ARGS", strings.Join(args, " "))
 	return File{Path: KubeletFlagsEnvPath, Content: []byte(content), Mode: 0o644}
+}
+
+// ambientCACertMountPaths mirrors kubeadm's own unexported
+// controlplane.caCertsExtraVolumePaths (volumes.go): host paths that
+// kubeadm's GetStaticPodSpecs conditionally mounts into apiserver/
+// controller-manager if present ON THE RENDER HOST (an os.Stat check).
+// That makes the manifest bytes depend on which of these happen to
+// exist on whatever machine runs the render — ineligible for a
+// content-hashed desired document (IMPLEMENTATION_PLAN §1.3). nanokube
+// carries its own PKI end-to-end via the desired document (Task 4), so
+// these distro CA-trust-store mounts serve no purpose here;
+// stripAmbientHostMounts removes them unconditionally rather than
+// conditionally reproducing render-host state. The always-present
+// "/etc/ssl/certs" mount kubeadm also adds is NOT in this list: unlike
+// these five, it is added unconditionally (not os.Stat-gated), so it
+// doesn't vary by render host and is left as-is.
+//
+// Tradeoff, deliberate: this leaves apiserver/controller-manager with
+// no path to system/public CA trust at all, only nanokube's own PKI.
+// Nothing in nanokube's current scope needs it (no OIDC issuer,
+// webhook backend, or cloud API signed by a public CA); a future
+// feature that does need it must supply CA material via nanokube's own
+// PKI/desired document, not rely on the host trust store.
+var ambientCACertMountPaths = []string{
+	"/etc/pki/ca-trust",
+	"/etc/pki/tls/certs",
+	"/etc/ca-certificates",
+	"/usr/share/ca-certificates",
+	"/usr/local/share/ca-certificates",
+}
+
+// ambientCACertVolumeName reproduces the exact volume-name mangling
+// kubeadm's isExtraVolumeMountNeeded caller applies to each
+// ambientCACertMountPaths entry (controlplane/volumes.go:
+// strings.Replace(path, "/", "-", -1)[1:]). stripAmbientHostMounts
+// matches on this generated Name in addition to the HostPath, so a
+// hypothetical user-declared ExtraVolumes entry that happens to target
+// one of these same paths under a name of its own choosing is never
+// mistaken for kubeadm's ambient one (currently moot — nanokube sets
+// no ExtraVolumes anywhere — but cheap to get right regardless).
+func ambientCACertVolumeName(path string) string {
+	return strings.Replace(path, "/", "-", -1)[1:]
+}
+
+// stripAmbientHostMounts removes any Volume (and matching
+// VolumeMounts) that kubeadm generated for one of
+// ambientCACertMountPaths — identified by both HostPath and Name, not
+// HostPath alone.
+func stripAmbientHostMounts(pod *corev1.Pod) {
+	removedNames := map[string]bool{}
+	var keptVolumes []corev1.Volume
+	for _, v := range pod.Spec.Volumes {
+		isAmbient := false
+		if v.HostPath != nil {
+			for _, p := range ambientCACertMountPaths {
+				if v.HostPath.Path == p && v.Name == ambientCACertVolumeName(p) {
+					isAmbient = true
+					break
+				}
+			}
+		}
+		if isAmbient {
+			removedNames[v.Name] = true
+			continue
+		}
+		keptVolumes = append(keptVolumes, v)
+	}
+	pod.Spec.Volumes = keptVolumes
+
+	for i := range pod.Spec.Containers {
+		var keptMounts []corev1.VolumeMount
+		for _, m := range pod.Spec.Containers[i].VolumeMounts {
+			if removedNames[m.Name] {
+				continue
+			}
+			keptMounts = append(keptMounts, m)
+		}
+		pod.Spec.Containers[i].VolumeMounts = keptMounts
+	}
+}
+
+// ControlPlaneManifests renders the four control-plane static pod
+// manifests (etcd, kube-apiserver, kube-controller-manager,
+// kube-scheduler) against a throwaway scratch directory, then reads
+// the results back. CertificatesDir on the cfg passed to these calls
+// is pinned to nodePKIDir so the manifests reference where PKI lands
+// on the node after the confext merge, not the scratch path used
+// during rendering.
+//
+// The apiserver/controller-manager/scheduler specs come from
+// controlplane.GetStaticPodSpecs directly (not the
+// CreateInitStaticPodManifestFiles convenience wrapper, which always
+// passes proxyEnvs=nil): passing an explicit, non-nil empty proxyEnvs
+// pins that input instead of letting kubeadm scan the render process's
+// os.Environ() for *_proxy variables and bake them in — the same
+// "pin via explicit input" pattern used elsewhere (e.g.
+// KubeletResolverConfig). stripAmbientHostMounts then removes the one
+// remaining ambient behavior GetStaticPodSpecs has no input for. Both
+// RootlessControlPlane and patchesDir handling from the wrapper are
+// intentionally not reproduced: this repo never sets that feature gate
+// (confirmed empty FeatureGates throughout) and always renders with no
+// patches, so the wrapper's branches for them are unreachable dead
+// weight here.
+func ControlPlaneManifests(cfg *kubeadmapi.InitConfiguration) ([]File, error) {
+	scratch, err := os.MkdirTemp("", "nanokube-render-manifests-*")
+	if err != nil {
+		return nil, fmt.Errorf("render: scratch dir: %w", err)
+	}
+	defer os.RemoveAll(scratch)
+
+	own := *cfg
+	own.ClusterConfiguration.CertificatesDir = nodePKIDir
+
+	const isDryRun = false
+	if err := etcd.CreateLocalEtcdStaticPodManifestFile(
+		scratch, "", own.NodeRegistration.Name, &own.ClusterConfiguration, &own.LocalAPIEndpoint, isDryRun,
+	); err != nil {
+		return nil, fmt.Errorf("render: etcd manifest: %w", err)
+	}
+
+	specs := controlplane.GetStaticPodSpecs(&own.ClusterConfiguration, &own.LocalAPIEndpoint, []kubeadmapi.EnvVar{})
+	for name, spec := range specs {
+		stripAmbientHostMounts(&spec)
+		if err := staticpodutil.WriteStaticPodToDisk(name, scratch, spec); err != nil {
+			return nil, fmt.Errorf("render: write %s manifest: %w", name, err)
+		}
+	}
+
+	names := []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler"}
+	files := make([]File, 0, len(names))
+	for _, n := range names {
+		content, err := os.ReadFile(filepath.Join(scratch, n+".yaml"))
+		if err != nil {
+			return nil, fmt.Errorf("render: read back %s: %w", n, err)
+		}
+		files = append(files, File{Path: ManifestsPathPrefix + n + ".yaml", Content: content, Mode: 0o644})
+	}
+	return files, nil
 }
