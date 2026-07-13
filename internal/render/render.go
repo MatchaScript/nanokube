@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
@@ -28,6 +29,12 @@ import (
 // actually reads is decided by the image's kubelet drop-in (--config);
 // this package only owns the rendering, not the drop-in.
 const KubeletConfigPath = "etc/kubernetes/kubelet-config.yaml"
+
+// KubeletFlagsEnvPath is the confext-tree-relative path of the kubelet
+// dynamic env file. Step 2 moves it from /var/lib/kubelet (outside the
+// confext's /etc reach) to /etc/kubernetes; the kubelet drop-in's
+// EnvironmentFile= follows (devenv image overlay).
+const KubeletFlagsEnvPath = "etc/kubernetes/kubeadm-flags.env"
 
 // File is one entry in a Desired document's file list. Path is
 // relative to the confext tree root, e.g.
@@ -124,4 +131,21 @@ func KubeletConfig(cfg *kubeadmapi.InitConfiguration) (File, error) {
 		return File{}, fmt.Errorf("render: read rendered kubelet config: %w", err)
 	}
 	return File{Path: KubeletConfigPath, Content: content, Mode: 0o644}, nil
+}
+
+// KubeletFlagsEnv renders kubeadm-flags.env without kubeadm's
+// WriteKubeletDynamicEnvFile: that writer decides whether to emit
+// --hostname-override by comparing against the render host's hostname
+// (GetHostname("")), which is meaningless off-node and makes the bytes
+// depend on where rendering runs. Node identity is explicit input here,
+// so the override is emitted unconditionally; KubeletExtraArgs pass
+// through in order. Format parity is pinned by the
+// ReadKubeletDynamicEnvFile round-trip test.
+func KubeletFlagsEnv(cfg *kubeadmapi.InitConfiguration) File {
+	args := []string{"--hostname-override=" + cfg.NodeRegistration.Name}
+	for _, a := range cfg.NodeRegistration.KubeletExtraArgs {
+		args = append(args, "--"+a.Name+"="+a.Value)
+	}
+	content := fmt.Sprintf("%s=%q\n", "KUBELET_KUBEADM_ARGS", strings.Join(args, " "))
+	return File{Path: KubeletFlagsEnvPath, Content: []byte(content), Mode: 0o644}
 }

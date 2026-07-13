@@ -3,11 +3,13 @@ package render
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	"github.com/MatchaScript/nanokube/internal/kubeadm"
@@ -129,5 +131,62 @@ func TestNameChangesWhenOnlyModeChanges(t *testing.T) {
 	b := Desired{Files: []File{{Path: "etc/x", Content: []byte("c"), Mode: 0o600}}}
 	if a.Name() == b.Name() {
 		t.Error("Name() must change when only a file's Mode changes")
+	}
+}
+
+// TestKubeletFlagsEnv_HostnameOverrideIsUnconditional guards against
+// reintroducing kubeadm's WriteKubeletDynamicEnvFile behavior, which
+// only emits --hostname-override when the configured node name differs
+// from the render host's own hostname (GetHostname("")) — an ambient
+// comparison that has no meaning off-node. KubeletFlagsEnv must emit
+// the override unconditionally, regardless of what machine renders it.
+func TestKubeletFlagsEnv_HostnameOverrideIsUnconditional(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.NodeRegistration.Name = "test-node-0"
+
+	f := KubeletFlagsEnv(cfg)
+	if f.Path != KubeletFlagsEnvPath {
+		t.Errorf("Path = %q, want %q", f.Path, KubeletFlagsEnvPath)
+	}
+	if f.Mode != 0o644 {
+		t.Errorf("Mode = %o, want 0644", f.Mode)
+	}
+	want := `KUBELET_KUBEADM_ARGS="--hostname-override=test-node-0"` + "\n"
+	if string(f.Content) != want {
+		t.Errorf("Content = %q, want %q (must not depend on the render host's hostname)", f.Content, want)
+	}
+}
+
+// TestKubeletFlagsEnv_ParsesWithKubeadmReader proves our hand-rendered
+// file is a format kubeadm's own ReadKubeletDynamicEnvFile can parse,
+// so switching writers doesn't change what the kubelet drop-in reads.
+func TestKubeletFlagsEnv_ParsesWithKubeadmReader(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.NodeRegistration.Name = "test-node-0"
+
+	f := KubeletFlagsEnv(cfg)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kubeadm-flags.env")
+	if err := os.WriteFile(path, f.Content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, err := kubelet.ReadKubeletDynamicEnvFile(path)
+	if err != nil {
+		t.Fatalf("kubeadm's own reader must parse our env file: %v", err)
+	}
+	if len(args) != 1 || args[0] != "--hostname-override=test-node-0" {
+		t.Errorf("parsed args = %v", args)
+	}
+}
+
+func TestKubeletFlagsEnv_ExtraArgsPassThrough(t *testing.T) {
+	cfg := defaultedInit(t)
+	cfg.NodeRegistration.Name = "test-node-0"
+	cfg.NodeRegistration.KubeletExtraArgs = []kubeadmapi.Arg{{Name: "node-ip", Value: "10.0.0.5"}}
+
+	f := KubeletFlagsEnv(cfg)
+	want := `KUBELET_KUBEADM_ARGS="--hostname-override=test-node-0 --node-ip=10.0.0.5"` + "\n"
+	if string(f.Content) != want {
+		t.Errorf("Content = %q, want %q", f.Content, want)
 	}
 }
