@@ -85,7 +85,7 @@ impl OpsProvider for RealOpsProvider {
 pub struct AgentService {
     ops_provider: Arc<dyn OpsProvider>,
     /// Serializes apply() across concurrent PushDesired calls: place /
-    /// refresh / bootc switch on one node must not interleave.
+    /// refresh on one node must not interleave.
     apply_lock: tokio::sync::Mutex<()>,
 }
 
@@ -109,7 +109,6 @@ impl agent_server::Agent for AgentService {
         let _guard = self.apply_lock.lock().await;
         let metadata = DesiredMetadata {
             name: desired.name,
-            target_image_digest: desired.target_image_digest,
             blob_sha256: desired.blob_sha256,
         };
 
@@ -148,8 +147,8 @@ mod tests {
 
     /// Records every `Ops` call (shared across the `Box<dyn Ops>` handed
     /// out per RPC and the test's assertions) with fresh/empty
-    /// bookkeeping and a non-bootc host, matching
-    /// `pipeline::tests::new_desired_places_refreshes_and_writes_bookkeeping_before_bootc`.
+    /// bookkeeping, matching
+    /// `pipeline::tests::new_desired_places_refreshes_and_writes_bookkeeping`.
     #[derive(Clone, Default)]
     struct FakeOpsProvider {
         calls: Arc<Mutex<Vec<String>>>,
@@ -277,7 +276,6 @@ mod tests {
 
         let request = Request::new(Desired {
             name: "v1-name".to_string(),
-            target_image_digest: "sha256:TARGET".to_string(),
             blob_sha256,
             blob,
         });
@@ -294,7 +292,6 @@ mod tests {
                 "place:v1-name".to_string(),
                 "refresh".to_string(),
                 "write_bookkeeping:v1-name".to_string(),
-                "bootc_status".to_string(),
             ]
         );
     }
@@ -307,7 +304,6 @@ mod tests {
 
         let request = Request::new(Desired {
             name: "v1-name".to_string(),
-            target_image_digest: "sha256:TARGET".to_string(),
             blob_sha256: "0".repeat(64), // deliberately wrong
             blob: b"confext-blob".to_vec(),
         });
@@ -332,7 +328,6 @@ mod tests {
             let blob = b"blob".to_vec();
             let request = Request::new(Desired {
                 name: bad.to_string(),
-                target_image_digest: "sha256:T".to_string(),
                 blob_sha256: sha256_hex(&blob),
                 blob,
             });
@@ -360,7 +355,6 @@ mod tests {
                 let blob = format!("blob-{i}").into_bytes();
                 let request = Request::new(Desired {
                     name: format!("name-{i}"),
-                    target_image_digest: "sha256:T".to_string(),
                     blob_sha256: sha256_hex(&blob),
                     blob,
                 });

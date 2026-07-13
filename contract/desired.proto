@@ -4,21 +4,16 @@ package nanokube.desired.v1;
 
 option go_package = "github.com/MatchaScript/nanokube/contract/desiredpb";
 
-// Desired is the per-node desired document: rendered config (as a confext
-// DDI blob) and the target OS image digest, applied together as one atom.
-// See docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md,
+// Desired is the per-node desired document: config only, rendered as a
+// confext DDI blob. See docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md,
 // "desired は一枚のドキュメント".
 message Desired {
-  // name is the confext version name: a content hash of the rendered
-  // manifest (file list) that produced blob. Excludes target_image_digest
-  // so an image-only update does not trigger a DDI rebuild — see
-  // internal/render.Desired.Name().
-  string name = 1;
+  reserved 2;
+  reserved "target_image_digest";
 
-  // target_image_digest is the bootc image this config is meant to run
-  // under, applied alongside blob as part of the same atomic document.
-  // Not part of name's hash.
-  string target_image_digest = 2;
+  // name is the content hash of the rendered file set (= revision) that
+  // produced blob — see internal/render.Desired.Name().
+  string name = 1;
 
   // blob_sha256 is the sha256 of blob, for transport integrity
   // verification independent of any dm-verity signature.
@@ -34,8 +29,10 @@ message Desired {
 // enough to inspect/diff, while the blob lives separately as the .raw
 // file or travels over gRPC as Desired.blob.
 message DesiredMetadata {
+  reserved 2;
+  reserved "target_image_digest";
+
   string name = 1;
-  string target_image_digest = 2;
   string blob_sha256 = 3;
 }
 
@@ -56,9 +53,9 @@ message PushDesiredResponse {
 // or self-signed) — mTLS/PKI hardening is Step 5.
 service Agent {
   // PushDesired delivers a new desired document for the agent to apply:
-  // blob sha256 verification, confext placement + refresh, bookkeeping,
-  // then bootc stage, in that order (see internal/ddi and the agent's
-  // own apply pipeline). Idempotent: pushing a Desired whose name matches
+  // blob sha256 verification, confext placement + refresh, then
+  // bookkeeping, in that order (see internal/ddi and the agent's own
+  // apply pipeline). Idempotent: pushing a Desired whose name matches
   // what's already applied is a no-op success.
   rpc PushDesired(Desired) returns (PushDesiredResponse);
 }

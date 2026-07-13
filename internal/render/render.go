@@ -1,8 +1,7 @@
 // Package render produces the per-node desired document: a fully
-// rendered, content-hash-named bundle of confext-layout files plus the
-// target bootc image digest. Rendering happens once, here, using
-// kubeadm's own library calls — nodes never template or default-fill
-// on their own.
+// rendered, content-hash-named bundle of confext-layout files.
+// Rendering happens once, here, using kubeadm's own library calls —
+// nodes never template or default-fill on their own.
 package render
 
 import (
@@ -39,12 +38,11 @@ type File struct {
 	Mode    fs.FileMode
 }
 
-// Desired is the per-node desired document: a fully rendered file list
-// and the target image digest, applied together as one atom. It holds
-// no apply-mode — reboot/staging decisions are made elsewhere.
+// Desired is the per-node desired document: a fully rendered file
+// list. It holds no apply-mode — reboot/staging decisions are made
+// elsewhere.
 type Desired struct {
-	ImageDigest string
-	Files       []File
+	Files []File
 }
 
 // Name returns a deterministic identifier derived from d's rendered
@@ -56,11 +54,7 @@ type Desired struct {
 // bookkeeping key for later stages — including the trigger for
 // rebuilding the confext DDI itself.
 //
-// Name is intentionally insensitive to ImageDigest: a pure OS image
-// update (digest changes, rendered config files don't) must not force
-// a pointless DDI rebuild, so the digest is excluded from the hash
-// even though it remains part of the Desired document and is applied
-// atomically alongside the files.
+// Name() = revision (see IMPLEMENTATION_PLAN.md §2).
 func (d Desired) Name() string {
 	h := sha256.New()
 

@@ -16,8 +16,6 @@ use crate::pipeline::{ApplyError, DesiredMetadata, Ops, apply};
 #[derive(Debug, Deserialize)]
 struct DesiredMetadataJson {
     name: String,
-    #[serde(rename = "targetImageDigest")]
-    target_image_digest: String,
     #[serde(rename = "blobSha256")]
     blob_sha256: String,
 }
@@ -26,7 +24,6 @@ impl From<DesiredMetadataJson> for DesiredMetadata {
     fn from(j: DesiredMetadataJson) -> Self {
         DesiredMetadata {
             name: j.name,
-            target_image_digest: j.target_image_digest,
             blob_sha256: j.blob_sha256,
         }
     }
@@ -164,16 +161,6 @@ mod tests {
             meta.name, name,
             "metadata name must match the fixture filename"
         );
-        let digest_hex = meta
-            .target_image_digest
-            .strip_prefix("sha256:")
-            .expect("target_image_digest should have a sha256: prefix");
-        assert_eq!(
-            digest_hex.len(),
-            64,
-            "sha256 digest should be 64 hex chars, got {digest_hex:?}"
-        );
-        assert!(digest_hex.chars().all(|c| c.is_ascii_hexdigit()));
 
         let raw_path = json_path.with_extension("raw");
         let raw = fs::read(&raw_path).expect("read fixture .raw");
@@ -196,7 +183,7 @@ mod tests {
         let json_path = dir.path().join("no-such-name.json");
         fs::write(
             &json_path,
-            br#"{"name":"no-such-name","targetImageDigest":"sha256:AAA","blobSha256":"deadbeef"}"#,
+            br#"{"name":"no-such-name","blobSha256":"deadbeef"}"#,
         )
         .unwrap();
 

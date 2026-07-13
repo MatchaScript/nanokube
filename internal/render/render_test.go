@@ -43,31 +43,19 @@ func TestKubeletConfig_Determinism(t *testing.T) {
 		t.Fatalf("KubeletConfig output differs across repeated calls:\n1: %s\n2: %s", f1.Content, f2.Content)
 	}
 
-	d1 := Desired{ImageDigest: "sha256:abc", Files: []File{f1}}
-	d2 := Desired{ImageDigest: "sha256:abc", Files: []File{f2}}
+	d1 := Desired{Files: []File{f1}}
+	d2 := Desired{Files: []File{f2}}
 	if d1.Name() != d2.Name() {
 		t.Fatalf("Desired.Name() not deterministic: %q vs %q", d1.Name(), d2.Name())
 	}
 }
 
-func TestDesired_Name_InsensitiveToImageDigest(t *testing.T) {
-	files := []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("same content")}}
-	a := Desired{ImageDigest: "sha256:aaa", Files: files}
-	b := Desired{ImageDigest: "sha256:bbb", Files: files}
-
-	if a.Name() != b.Name() {
-		t.Fatalf("Name() changed after ImageDigest-only change: %q vs %q", a.Name(), b.Name())
-	}
-}
-
 func TestDesired_Name_SensitiveToFileContent(t *testing.T) {
 	a := Desired{
-		ImageDigest: "sha256:aaa",
-		Files:       []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("content-a")}},
+		Files: []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("content-a")}},
 	}
 	b := Desired{
-		ImageDigest: "sha256:aaa",
-		Files:       []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("content-b")}},
+		Files: []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("content-b")}},
 	}
 
 	if a.Name() == b.Name() {
@@ -77,8 +65,7 @@ func TestDesired_Name_SensitiveToFileContent(t *testing.T) {
 
 func TestDesired_Name_IsValidConfextName(t *testing.T) {
 	d := Desired{
-		ImageDigest: "sha256:abc123",
-		Files:       []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("hello")}},
+		Files: []File{{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("hello")}},
 	}
 	name := d.Name()
 

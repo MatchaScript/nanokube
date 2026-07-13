@@ -65,9 +65,8 @@ func TestNewGRPCPush_SuccessSendsExactDesired(t *testing.T) {
 
 	push := NewGRPCPush(addr)
 	meta := &desiredpb.DesiredMetadata{
-		Name:              "v1-name",
-		TargetImageDigest: "sha256:TARGET",
-		BlobSha256:        "abc123",
+		Name:       "v1-name",
+		BlobSha256: "abc123",
 	}
 	if err := push(context.Background(), meta, rawPath); err != nil {
 		t.Fatalf("push: %v", err)
@@ -78,9 +77,6 @@ func TestNewGRPCPush_SuccessSendsExactDesired(t *testing.T) {
 	}
 	if fake.received.Name != meta.Name {
 		t.Errorf("received.Name = %q, want %q", fake.received.Name, meta.Name)
-	}
-	if fake.received.TargetImageDigest != meta.TargetImageDigest {
-		t.Errorf("received.TargetImageDigest = %q, want %q", fake.received.TargetImageDigest, meta.TargetImageDigest)
 	}
 	if fake.received.BlobSha256 != meta.BlobSha256 {
 		t.Errorf("received.BlobSha256 = %q, want %q", fake.received.BlobSha256, meta.BlobSha256)
@@ -101,7 +97,7 @@ func TestNewGRPCPush_AgentErrorSurfaces(t *testing.T) {
 	}
 
 	push := NewGRPCPush(addr)
-	meta := &desiredpb.DesiredMetadata{Name: "name", TargetImageDigest: "sha256:X", BlobSha256: "bad"}
+	meta := &desiredpb.DesiredMetadata{Name: "name", BlobSha256: "bad"}
 	err := push(context.Background(), meta, rawPath)
 	if err == nil {
 		t.Fatal("push: want non-nil error, got nil")
@@ -119,7 +115,7 @@ func TestNewGRPCPush_MissingBlobSkipsPushWithoutError(t *testing.T) {
 	rawPath := filepath.Join(dir, "missing.raw") // deliberately never written
 
 	push := NewGRPCPush(addr)
-	meta := &desiredpb.DesiredMetadata{Name: "missing", TargetImageDigest: "sha256:X", BlobSha256: buildSkippedSentinel}
+	meta := &desiredpb.DesiredMetadata{Name: "missing", BlobSha256: buildSkippedSentinel}
 	if err := push(context.Background(), meta, rawPath); err != nil {
 		t.Fatalf("push: %v, want nil (a missing blob should skip the push, not error)", err)
 	}

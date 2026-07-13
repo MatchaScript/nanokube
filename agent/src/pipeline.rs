@@ -3,11 +3,10 @@
 //! `apply` takes a fully-rendered desired document (metadata + confext DDI
 //! blob, already built server-side by the operator) and reconciles the
 //! node to it: verify the blob's checksum, place + refresh the confext if
-//! it changed, record the applied name as a fact, then reconcile the
-//! booted OS image via bootc. There is no render step here and no cache
-//! of the last desired document across calls — every call is handed a
-//! fresh `DesiredMetadata` + blob and starts from what `Ops` reports on
-//! disk.
+//! it changed, and record the applied name as a fact. There is no render
+//! step here and no cache of the last desired document across calls —
+//! every call is handed a fresh `DesiredMetadata` + blob and starts from
+//! what `Ops` reports on disk.
 //!
 //! `Ops` is the injectable seam for everything that touches the outside
 //! world (filesystem, systemd-confext, bootc). This module performs no
@@ -22,7 +21,6 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredMetadata {
     pub name: String,
-    pub target_image_digest: String,
     pub blob_sha256: String,
 }
 
@@ -115,8 +113,7 @@ impl From<OpsError> for ApplyError {
 
 /// Verifies `blob` against `desired.blob_sha256`, places + refreshes it
 /// if `desired.name` differs from what's already applied (a no-op skip
-/// otherwise) and records the applied name, then reconciles the booted
-/// OS image via bootc (skipped entirely on a non-bootc host).
+/// otherwise) and records the applied name.
 ///
 /// On checksum mismatch, returns immediately: nothing on `ops` is called.
 pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Result<(), ApplyError> {
@@ -129,20 +126,6 @@ pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Resul
         ops.write_bookkeeping(&Bookkeeping {
             desired_name: desired.name.clone(),
         })?;
-    }
-
-    let Some(status) = ops.bootc_status()? else {
-        // Not a bootc host: config delivery is already done above.
-        return Ok(());
-    };
-
-    let target = desired.target_image_digest.as_str();
-    let already_at_target =
-        target == status.booted_digest || status.staged_digest.as_deref() == Some(target);
-
-    if !already_at_target {
-        let image_ref = format!("{}@{}", repo_without_ref(&status.booted_image), target);
-        ops.bootc_switch(&image_ref)?;
     }
 
     Ok(())
@@ -161,29 +144,6 @@ fn verify_checksum(desired: &DesiredMetadata, blob: &[u8]) -> Result<(), ApplyEr
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Strips the tag/digest suffix off an image reference, leaving the bare
-/// repo (registry host + path). Used to derive a resolvable `bootc
-/// switch` target from the currently booted image's pull-spec (its repo
-/// persists across updates) plus the new desired digest: `bootc switch`
-/// cannot resolve a bare digest on its own.
-fn repo_without_ref(image: &str) -> &str {
-    if let Some(at) = image.rfind('@') {
-        return &image[..at];
-    }
-    match image.rfind('/') {
-        // A ':' after the last '/' is a tag separator. A ':' before it
-        // (e.g. "localhost:5000/...") is a registry port, not a tag.
-        Some(slash) => match image[slash..].rfind(':') {
-            Some(colon) => &image[..slash + colon],
-            None => image,
-        },
-        None => match image.rfind(':') {
-            Some(colon) => &image[..colon],
-            None => image,
-        },
-    }
 }
 
 #[cfg(test)]
@@ -251,10 +211,9 @@ mod tests {
     }
 
     /// A `DesiredMetadata` whose `blob_sha256` genuinely matches `blob`.
-    fn desired(name: &str, target_digest: &str, blob: &[u8]) -> DesiredMetadata {
+    fn desired(name: &str, blob: &[u8]) -> DesiredMetadata {
         DesiredMetadata {
             name: name.to_string(),
-            target_image_digest: target_digest.to_string(),
             blob_sha256: sha256_hex(blob),
         }
     }
@@ -262,7 +221,7 @@ mod tests {
     #[test]
     fn checksum_mismatch_short_circuits_before_any_ops_call() {
         let blob = b"real-blob";
-        let mut d = desired("v1", "sha256:AAA", blob);
+        let mut d = desired("v1", blob);
         d.blob_sha256 = "0".repeat(64); // deliberately wrong
         let mut ops = FakeOps::default();
 
@@ -283,10 +242,10 @@ mod tests {
     }
 
     #[test]
-    fn new_desired_places_refreshes_and_writes_bookkeeping_before_bootc() {
+    fn new_desired_places_refreshes_and_writes_bookkeeping() {
         let blob = b"confext-blob";
-        let d = desired("v1-name", "sha256:TARGET", blob);
-        let mut ops = FakeOps::default(); // empty bookkeeping, Ok(None) bootc status
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps::default(); // empty bookkeeping
 
         apply(&d, blob, &mut ops).unwrap();
 
@@ -297,7 +256,6 @@ mod tests {
                 "place:v1-name".to_string(),
                 "refresh".to_string(),
                 "write_bookkeeping:v1-name".to_string(),
-                "bootc_status".to_string(),
             ]
         );
         assert_eq!(
@@ -306,157 +264,5 @@ mod tests {
                 desired_name: "v1-name".to_string(),
             }]
         );
-    }
-
-    #[test]
-    fn idempotent_config_skip_still_runs_bootc_switch() {
-        let blob = b"same-blob";
-        let d = desired("already-applied", "sha256:NEW", blob);
-        let mut ops = FakeOps {
-            bookkeeping: Bookkeeping {
-                desired_name: "already-applied".to_string(),
-            },
-            bootc_status_response: Ok(Some(BootcStatus {
-                booted_image: "quay.io/foo/node:v1".to_string(),
-                booted_digest: "sha256:OLD".to_string(),
-                staged_image: None,
-                staged_digest: None,
-            })),
-            ..FakeOps::default()
-        };
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        // No place/refresh/write_bookkeeping: config was already applied.
-        // bootc status/switch still ran.
-        assert_eq!(
-            ops.calls,
-            vec![
-                "read_bookkeeping".to_string(),
-                "bootc_status".to_string(),
-                "bootc_switch:quay.io/foo/node@sha256:NEW".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn bug1_regression_switch_uses_full_image_ref_not_bare_digest() {
-        let blob = b"blob";
-        let d = desired("name", "sha256:BBB", blob);
-        let mut ops = FakeOps {
-            bookkeeping: Bookkeeping {
-                desired_name: "name".to_string(),
-            },
-            bootc_status_response: Ok(Some(BootcStatus {
-                booted_image: "quay.io/foo/node:v1".to_string(),
-                booted_digest: "sha256:AAA".to_string(),
-                staged_image: None,
-                staged_digest: None,
-            })),
-            ..FakeOps::default()
-        };
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        // Regression guard for bug 1: must be a resolvable full
-        // reference, not the bare "sha256:BBB" digest.
-        assert_eq!(
-            ops.switch_targets,
-            vec!["quay.io/foo/node@sha256:BBB".to_string()]
-        );
-    }
-
-    #[test]
-    fn already_booted_at_target_skips_switch() {
-        let blob = b"blob";
-        let d = desired("name", "sha256:AAA", blob);
-        let mut ops = FakeOps {
-            bookkeeping: Bookkeeping {
-                desired_name: "name".to_string(),
-            },
-            bootc_status_response: Ok(Some(BootcStatus {
-                booted_image: "quay.io/foo/node@sha256:AAA".to_string(),
-                booted_digest: "sha256:AAA".to_string(),
-                staged_image: None,
-                staged_digest: None,
-            })),
-            ..FakeOps::default()
-        };
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        assert!(ops.switch_targets.is_empty());
-    }
-
-    #[test]
-    fn already_staged_at_target_skips_switch() {
-        let blob = b"blob";
-        let d = desired("name", "sha256:BBB", blob);
-        let mut ops = FakeOps {
-            bookkeeping: Bookkeeping {
-                desired_name: "name".to_string(),
-            },
-            bootc_status_response: Ok(Some(BootcStatus {
-                booted_image: "quay.io/foo/node:v1".to_string(),
-                booted_digest: "sha256:AAA".to_string(),
-                staged_image: Some("quay.io/foo/node@sha256:BBB".to_string()),
-                staged_digest: Some("sha256:BBB".to_string()),
-            })),
-            ..FakeOps::default()
-        };
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        assert!(ops.switch_targets.is_empty());
-        // name matches, so no write_bookkeeping call either.
-        assert!(ops.write_bookkeeping_calls.is_empty());
-    }
-
-    #[test]
-    fn not_a_bootc_host_skips_staging_but_config_delivery_still_happens() {
-        let blob = b"blob";
-        let d = desired("fresh-name", "sha256:TARGET", blob);
-        let mut ops = FakeOps::default(); // fresh bookkeeping, Ok(None) bootc status
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        assert!(ops.calls.contains(&"place:fresh-name".to_string()));
-        assert!(ops.calls.contains(&"refresh".to_string()));
-        assert!(ops.switch_targets.is_empty());
-        assert_eq!(ops.calls.last(), Some(&"bootc_status".to_string()));
-    }
-
-    #[test]
-    fn repo_without_ref_strips_tag() {
-        assert_eq!(repo_without_ref("quay.io/foo/node:v1"), "quay.io/foo/node");
-    }
-
-    #[test]
-    fn repo_without_ref_strips_digest() {
-        assert_eq!(
-            repo_without_ref("quay.io/foo/node@sha256:AAA"),
-            "quay.io/foo/node"
-        );
-    }
-
-    #[test]
-    fn repo_without_ref_port_not_mistaken_for_tag() {
-        assert_eq!(
-            repo_without_ref("localhost:5000/foo/node:v1"),
-            "localhost:5000/foo/node"
-        );
-    }
-
-    #[test]
-    fn repo_without_ref_digest_with_registry_port() {
-        assert_eq!(
-            repo_without_ref("localhost:5000/foo/node@sha256:AAA"),
-            "localhost:5000/foo/node"
-        );
-    }
-
-    #[test]
-    fn repo_without_ref_bare_image_unchanged() {
-        assert_eq!(repo_without_ref("quay.io/foo/node"), "quay.io/foo/node");
     }
 }

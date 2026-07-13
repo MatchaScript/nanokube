@@ -38,7 +38,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	kubeadmconfig "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
@@ -53,18 +52,13 @@ import (
 // from the repo root.
 const fixturesDir = "contract/fixtures"
 
-// placeholderImageDigest is a fixture-only stand-in for a real bootc
-// image digest: sha256 of nothing meaningful, just 64 hex zeroes.
-var placeholderImageDigest = "sha256:" + strings.Repeat("0", 64)
-
 // manifest is gen's own private handoff format between its render and
 // build subcommands. Files are staged as real files on disk under the
 // manifest directory (path relative to it, mirroring each render.File.Path)
 // so build can reconstruct []render.File byte-for-byte without
 // re-rendering.
 type manifest struct {
-	ImageDigest string             `json:"imageDigest"`
-	Files       []manifestFileMeta `json:"files"`
+	Files []manifestFileMeta `json:"files"`
 }
 
 type manifestFileMeta struct {
@@ -103,7 +97,7 @@ func runRender(manifestDir string) {
 	}
 	files := []render.File{kubeletFile}
 
-	m := manifest{ImageDigest: placeholderImageDigest}
+	var m manifest
 	for _, f := range files {
 		dest := filepath.Join(manifestDir, f.Path)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -128,7 +122,7 @@ func runRender(manifestDir string) {
 		log.Fatalf("gen render: write %s: %v", manifestPath, err)
 	}
 
-	desired := render.Desired{ImageDigest: m.ImageDigest, Files: files}
+	desired := render.Desired{Files: files}
 	fmt.Printf("rendered %d file(s) into %s (name will be %s)\n", len(files), manifestDir, desired.Name())
 }
 
@@ -155,7 +149,7 @@ func runBuild(manifestDir string) {
 		files = append(files, render.File{Path: fm.Path, Content: content, Mode: fm.Mode})
 	}
 
-	desired := render.Desired{ImageDigest: m.ImageDigest, Files: files}
+	desired := render.Desired{Files: files}
 	name := desired.Name()
 
 	rawPath := filepath.Join(fixturesDir, name+".raw")
@@ -173,9 +167,8 @@ func runBuild(manifestDir string) {
 	sum := sha256.Sum256(raw)
 
 	meta := &desiredpb.DesiredMetadata{
-		Name:              name,
-		TargetImageDigest: desired.ImageDigest,
-		BlobSha256:        hex.EncodeToString(sum[:]),
+		Name:       name,
+		BlobSha256: hex.EncodeToString(sum[:]),
 	}
 	jsonData, err := (protojson.MarshalOptions{Multiline: true, Indent: "  "}).Marshal(meta)
 	if err != nil {

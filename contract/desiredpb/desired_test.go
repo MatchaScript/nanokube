@@ -9,10 +9,9 @@ import (
 
 func TestDesired_ProtoRoundTrip(t *testing.T) {
 	want := &Desired{
-		Name:              "abc123",
-		TargetImageDigest: "sha256:deadbeef",
-		BlobSha256:        "sha256:cafef00d",
-		Blob:              []byte{0x00, 0x01, 0xff, 0x10},
+		Name:       "abc123",
+		BlobSha256: "sha256:cafef00d",
+		Blob:       []byte{0x00, 0x01, 0xff, 0x10},
 	}
 
 	wire, err := proto.Marshal(want)
@@ -28,9 +27,6 @@ func TestDesired_ProtoRoundTrip(t *testing.T) {
 	if got.GetName() != want.GetName() {
 		t.Errorf("Name = %q, want %q", got.GetName(), want.GetName())
 	}
-	if got.GetTargetImageDigest() != want.GetTargetImageDigest() {
-		t.Errorf("TargetImageDigest = %q, want %q", got.GetTargetImageDigest(), want.GetTargetImageDigest())
-	}
 	if got.GetBlobSha256() != want.GetBlobSha256() {
 		t.Errorf("BlobSha256 = %q, want %q", got.GetBlobSha256(), want.GetBlobSha256())
 	}
@@ -41,9 +37,8 @@ func TestDesired_ProtoRoundTrip(t *testing.T) {
 
 func TestDesiredMetadata_JSONRoundTrip(t *testing.T) {
 	want := &DesiredMetadata{
-		Name:              "abc123",
-		TargetImageDigest: "sha256:deadbeef",
-		BlobSha256:        "sha256:cafef00d",
+		Name:       "abc123",
+		BlobSha256: "sha256:cafef00d",
 	}
 
 	data, err := protojson.Marshal(want)
@@ -58,9 +53,6 @@ func TestDesiredMetadata_JSONRoundTrip(t *testing.T) {
 
 	if got.GetName() != want.GetName() {
 		t.Errorf("Name = %q, want %q", got.GetName(), want.GetName())
-	}
-	if got.GetTargetImageDigest() != want.GetTargetImageDigest() {
-		t.Errorf("TargetImageDigest = %q, want %q", got.GetTargetImageDigest(), want.GetTargetImageDigest())
 	}
 	if got.GetBlobSha256() != want.GetBlobSha256() {
 		t.Errorf("BlobSha256 = %q, want %q", got.GetBlobSha256(), want.GetBlobSha256())
