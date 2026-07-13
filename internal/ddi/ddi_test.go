@@ -221,3 +221,134 @@ func TestExtensionReleaseContent_IsAlwaysAny(t *testing.T) {
 		t.Fatalf("extensionReleaseContent = %q, want %q", extensionReleaseContent, "ID=_any\n")
 	}
 }
+
+// fedoraFileContexts is where selinux-policy-targeted installs the
+// file_contexts database (same policy family as the node image — Step
+// 2 design doc "SELinux ラベル規定", v0 procurement).
+const fedoraFileContexts = "/etc/selinux/targeted/contexts/files/file_contexts"
+
+// TestBuildAppliesSELinuxLabels verifies BuildInput.FileContextsPath
+// actually reaches mkfs.erofs and produces real per-inode
+// security.selinux xattrs instead of the Step 1 container_file_t
+// regression (PR #27).
+//
+// The expected label per path is computed independently with
+// matchpathcon against the SAME file_contexts database passed to
+// Build, rather than a hardcoded type name: a build container's own
+// selinux-policy-targeted is the sole source of truth (design doc
+// "SELinux ラベル規定" — no hand-maintained label table), and which
+// specific type a path maps to is not stable across Fedora policy
+// versions. Confirmed empirically against the CI-pinned
+// quay.io/fedora/fedora:42 image: its selinux-policy-targeted
+// (42.24-1.fc42) defines no /etc/kubernetes-specific type at all and
+// falls back to the generic etc_t, unlike some other systems' policy —
+// so asserting a fixed type such as kubernetes_file_t here would be
+// asserting something this policy version doesn't even claim.
+func TestBuildAppliesSELinuxLabels(t *testing.T) {
+	requireTools(t, "systemd-repart", "mkfs.erofs", "fsck.erofs", "matchpathcon")
+	if _, err := os.Stat(fedoraFileContexts); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI requires selinux-policy-targeted in the ddi container: %v", err)
+		}
+		t.Skipf("no file_contexts at %s", fedoraFileContexts)
+	}
+
+	out := filepath.Join(t.TempDir(), "labeled.raw")
+	err := Build(BuildInput{
+		Name: "labeltest",
+		Files: []render.File{
+			{Path: "etc/kubernetes/manifests/etcd.yaml", Content: []byte("k: v\n"), Mode: 0o644},
+			{Path: "etc/kubernetes/pki/ca.key", Content: []byte("KEY\n"), Mode: 0o600},
+		},
+		FileContextsPath: fedoraFileContexts,
+	}, out)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, path := range []string{
+		"/etc/kubernetes/manifests/etcd.yaml",
+		"/etc/kubernetes/pki/ca.key",
+	} {
+		want := matchpathconContext(t, fedoraFileContexts, path)
+		got := erofsXattr(t, out, path, "security.selinux")
+		if !strings.Contains(got, want) {
+			t.Errorf("%s: security.selinux = %q, want (via matchpathcon) %q", path, got, want)
+		}
+		if strings.Contains(got, "container_file_t") {
+			t.Errorf("%s: container_file_t regression (Step 1 PR #27)", path)
+		}
+	}
+}
+
+// matchpathconContext independently computes the SELinux context
+// fileContexts assigns path, using the same file_contexts database
+// mkfs.erofs --file-contexts consumes. This is the oracle
+// TestBuildAppliesSELinuxLabels checks Build's output against, instead
+// of a hardcoded type name.
+//
+// -m f pins the lookup to regular-file entries, matching what
+// mkfs.erofs itself queries for a regular file (erofs-utils'
+// erofs_get_selabel_xattr passes the real source inode's mode into
+// selabel_lookup). Without -m f, matchpathcon falls back to lstat'ing
+// path on the TEST-RUNNING filesystem to infer a mode — and path here
+// is a confext-tree path like "/etc/kubernetes/pki/ca.key" that does
+// not exist on that filesystem, so the lstat fails and matchpathcon
+// silently widens to an unfiltered (any file-kind) lookup. That
+// widened lookup happens to agree with the file-kind-filtered one for
+// the two paths this test checks today (both empirically confirmed
+// against the CI-pinned Fedora 42 policy), but the two lookups are
+// genuinely different queries against the same database (confirmed
+// against libselinux's label_file.c) and can diverge for other paths
+// — e.g. this exact database's /run and /mnt entries resolve
+// differently unfiltered vs. -m f. Passing -m f makes this oracle
+// query the same thing mkfs.erofs queries, on every axis, not just
+// today's two paths.
+func matchpathconContext(t *testing.T, fileContexts, path string) string {
+	t.Helper()
+	out, err := exec.Command("matchpathcon", "-n", "-m", "f", "-f", fileContexts, path).Output()
+	if err != nil {
+		t.Fatalf("matchpathcon %s: %v", path, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// erofsXattr reads the named xattr off pathInImage inside a built
+// erofs image.
+//
+// dump.erofs --path reports only "Xattr size: N" for an inode, never
+// the value (confirmed against erofs-utils 1.8.10 — no flag exposes
+// it), so it can't be used here. Instead this extracts the image with
+// fsck.erofs --extract=<dir> --xattrs, which asks the kernel to set
+// each extracted file's security.selinux from the image's own stored
+// value, then reads that xattr directly off the extracted file with
+// syscall.Getxattr — one less CLI tool (getfattr) to depend on for a
+// single read.
+//
+// The extraction's setxattr requires CAP_SYS_ADMIN (the kernel's
+// generic security.* xattr-write fallback, cap_inode_setxattr, absent
+// a more specific LSM hook) and, on an SELinux-enforcing host, also
+// requires the caller's domain to be unconfined enough to relabel to
+// an arbitrary target type — confirmed by reproducing both failure
+// modes in a local verification container. The ddi CI job runs on a
+// non-SELinux Ubuntu host, so only the capability applies there; its
+// container is granted --cap-add=SYS_ADMIN accordingly (ci.yaml).
+func erofsXattr(t *testing.T, image, pathInImage, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cmd := exec.Command("fsck.erofs", "--offset="+erofsPartitionOffset, "--extract="+dir, "--xattrs", image)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fsck.erofs --extract %s: %v: %s", image, err, out)
+	}
+
+	extracted := filepath.Join(dir, pathInImage)
+	size, err := syscall.Getxattr(extracted, name, nil)
+	if err != nil {
+		t.Fatalf("Getxattr(%s, %s) size: %v", extracted, name, err)
+	}
+	buf := make([]byte, size)
+	if _, err := syscall.Getxattr(extracted, name, buf); err != nil {
+		t.Fatalf("Getxattr(%s, %s): %v", extracted, name, err)
+	}
+	return string(buf)
+}
