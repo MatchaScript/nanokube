@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -362,5 +363,66 @@ func TestControlPlaneManifests_NoAmbientCACertMounts(t *testing.T) {
 	apiserver := files[1]
 	if !bytes.Contains(apiserver.Content, []byte("/etc/ssl/certs")) {
 		t.Error("apiserver manifest missing the unconditional /etc/ssl/certs mount (over-stripped?)")
+	}
+}
+
+func TestControlPlaneDesired_ContainsAllClasses(t *testing.T) {
+	cfg := defaultedInit(t)
+	d, err := ControlPlaneDesired(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]bool{}
+	for _, f := range d.Files {
+		paths[f.Path] = true
+	}
+	for _, p := range []string{
+		KubeletConfigPath,
+		KubeletFlagsEnvPath,
+		"etc/kubernetes/manifests/etcd.yaml",
+		"etc/kubernetes/pki/ca.key",
+		"etc/kubernetes/admin.conf",
+	} {
+		if !paths[p] {
+			t.Errorf("ControlPlaneDesired missing %s", p)
+		}
+	}
+}
+
+func TestWorkerDesired_HasNoCPMaterial(t *testing.T) {
+	cfg := defaultedInit(t)
+	d, err := WorkerDesired(cfg, []byte("apiVersion: v1\nkind: Config\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range d.Files {
+		if strings.HasPrefix(f.Path, ManifestsPathPrefix) || strings.HasPrefix(f.Path, "etc/kubernetes/pki/") {
+			t.Errorf("worker desired must not contain %s", f.Path)
+		}
+	}
+	paths := map[string]fs.FileMode{}
+	for _, f := range d.Files {
+		paths[f.Path] = f.Mode
+	}
+	if m, ok := paths["etc/kubernetes/bootstrap-kubelet.conf"]; !ok || m != 0o600 {
+		t.Errorf("bootstrap-kubelet.conf missing or wrong mode %o", m)
+	}
+	if _, ok := paths[KubeletConfigPath]; !ok {
+		t.Error("worker desired missing kubelet config")
+	}
+	if _, ok := paths[KubeletFlagsEnvPath]; !ok {
+		t.Error("worker desired missing kubelet flags env")
+	}
+}
+
+func TestDesired_RejectsOversizedRender(t *testing.T) {
+	// The rendered set is size-capped at render time, on the writer's
+	// side — unbounded user content (files:, extra args) must fail
+	// here, not wedge every subsequent write (an OCPBUGS-62619-shaped
+	// failure).
+	cfg := defaultedInit(t)
+	cfg.NodeRegistration.KubeletExtraArgs = []kubeadmapi.Arg{{Name: "big", Value: strings.Repeat("x", MaxRenderedBytes)}}
+	if _, err := WorkerDesired(cfg, nil); err == nil {
+		t.Fatal("oversized render must be rejected at assembly")
 	}
 }

@@ -362,3 +362,79 @@ func Credentials(cfg *kubeadmapi.InitConfiguration, credsDir string) ([]File, er
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }
+
+// MaxRenderedBytes caps the total rendered file set (sum of every
+// File.Content length). Renders land in etcd-backed objects on the
+// operator side, and unbounded user content (files:, extra args) must
+// fail at render time on the writer's side, not wedge every subsequent
+// write (an OCPBUGS-62619-shaped failure). The agent's receive
+// guardrail is a separate, larger limit and is unrelated to this cap.
+const MaxRenderedBytes = 512 << 10
+
+// validateSize rejects a Desired whose total File.Content bytes would
+// exceed MaxRenderedBytes.
+func (d Desired) validateSize() error {
+	total := 0
+	for _, f := range d.Files {
+		total += len(f.Content)
+	}
+	if total >= MaxRenderedBytes {
+		return fmt.Errorf("render: rendered set is %d bytes, cap is %d", total, MaxRenderedBytes)
+	}
+	return nil
+}
+
+// ControlPlaneDesired assembles the complete control-plane confext:
+// kubelet config + flags env, the four static pod manifests, and the
+// full PKI + kubeconfig set. This (and WorkerDesired) is the only
+// place a control-plane Desired may be assembled — the desired
+// document is one blob per node, so pushing a Desired built from a
+// subset of these classes would silently remove the missing ones from
+// the node on the next confext refresh.
+func ControlPlaneDesired(cfg *kubeadmapi.InitConfiguration, credsDir string) (Desired, error) {
+	kubeletCfg, err := KubeletConfig(cfg)
+	if err != nil {
+		return Desired{}, err
+	}
+	manifests, err := ControlPlaneManifests(cfg)
+	if err != nil {
+		return Desired{}, err
+	}
+	creds, err := Credentials(cfg, credsDir)
+	if err != nil {
+		return Desired{}, err
+	}
+	files := []File{kubeletCfg, KubeletFlagsEnv(cfg)}
+	files = append(files, manifests...)
+	files = append(files, creds...)
+	d := Desired{Files: files}
+	if err := d.validateSize(); err != nil {
+		return Desired{}, err
+	}
+	return d, nil
+}
+
+// WorkerDesired assembles the worker confext: kubelet config + flags
+// env, plus the TLS-bootstrap kubeconfig when joining
+// (bootstrapKubeconfig non-nil). See ControlPlaneDesired's doc comment
+// for why this is the only place a worker Desired may be assembled.
+//
+// The bootstrap kubeconfig stays in the confext after the join
+// completes; it is inert once /etc/kubernetes/kubelet.conf exists
+// (kubelet ignores --bootstrap-kubeconfig then) and its token has
+// expired.
+func WorkerDesired(cfg *kubeadmapi.InitConfiguration, bootstrapKubeconfig []byte) (Desired, error) {
+	kubeletCfg, err := KubeletConfig(cfg)
+	if err != nil {
+		return Desired{}, err
+	}
+	files := []File{kubeletCfg, KubeletFlagsEnv(cfg)}
+	if bootstrapKubeconfig != nil {
+		files = append(files, File{Path: "etc/kubernetes/bootstrap-kubelet.conf", Content: bootstrapKubeconfig, Mode: 0o600})
+	}
+	d := Desired{Files: files}
+	if err := d.validateSize(); err != nil {
+		return Desired{}, err
+	}
+	return d, nil
+}
