@@ -333,6 +333,13 @@ func matchpathconContext(t *testing.T, fileContexts, path string) string {
 // modes in a local verification container. The ddi CI job runs on a
 // non-SELinux Ubuntu host, so only the capability applies there; its
 // container is granted --cap-add=SYS_ADMIN accordingly (ci.yaml).
+//
+// Do not use a local dev host running SELinux Enforcing to sanity-check
+// this test: reproduced failing there with EPERM at this exact
+// extraction step in both rootless and rootful podman, --cap-add
+// SYS_ADMIN and --security-opt label=disable notwithstanding. Real CI
+// (PR #30, ubuntu-24.04, no SELinux) passes. Treat a local failure on
+// such a host as expected, not as a regression signal.
 func erofsXattr(t *testing.T, image, pathInImage, name string) string {
 	t.Helper()
 	dir := t.TempDir()
