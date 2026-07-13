@@ -254,19 +254,17 @@ fn write_order(path: &Path, order: &[String]) -> io::Result<()> {
 }
 
 /// Wire shape for the bookkeeping JSON file, matching the abandoned Go
-/// agent's field names exactly (`expectedDigest`/`desiredName`).
+/// agent's field name exactly (`desiredName`).
 ///
-/// Always emits both keys, including when empty: `pipeline::Bookkeeping`
-/// already treats `""` as the normal "unset" value for both fields (see
-/// its doc comment), and deserialization falls back to `""` via
-/// `#[serde(default)]` regardless of whether the key was present at
+/// Always emits `desiredName`, including when empty:
+/// `pipeline::Bookkeeping` already treats `""` as the normal "unset"
+/// value (see its doc comment), and deserialization falls back to `""`
+/// via `#[serde(default)]` regardless of whether the key was present at
 /// all. So there's no information distinction between an omitted key
-/// and an explicit `""` to preserve — always emitting both keeps the
+/// and an explicit `""` to preserve — always emitting the key keeps the
 /// on-disk format simple and predictable.
 #[derive(Debug, Serialize, Deserialize)]
 struct BookkeepingDoc {
-    #[serde(default, rename = "expectedDigest")]
-    expected_digest: String,
     #[serde(default, rename = "desiredName")]
     desired_name: String,
 }
@@ -274,7 +272,6 @@ struct BookkeepingDoc {
 impl From<Bookkeeping> for BookkeepingDoc {
     fn from(bk: Bookkeeping) -> Self {
         BookkeepingDoc {
-            expected_digest: bk.expected_digest,
             desired_name: bk.desired_name,
         }
     }
@@ -283,7 +280,6 @@ impl From<Bookkeeping> for BookkeepingDoc {
 impl From<BookkeepingDoc> for Bookkeeping {
     fn from(doc: BookkeepingDoc) -> Self {
         Bookkeeping {
-            expected_digest: doc.expected_digest,
             desired_name: doc.desired_name,
         }
     }
@@ -551,7 +547,6 @@ mod tests {
         let bk_path = dir.path().join("bookkeeping.json");
         let mut ops = RealOps::with_runner(dir.path(), &bk_path, FakeCommandRunner::new());
         let bk = Bookkeeping {
-            expected_digest: "sha256:AAA".to_string(),
             desired_name: "v1".to_string(),
         };
 
@@ -570,13 +565,12 @@ mod tests {
     }
 
     #[test]
-    fn bookkeeping_json_keys_are_exactly_expected_digest_and_desired_name() {
+    fn bookkeeping_json_key_is_exactly_desired_name() {
         let dir = TempDir::new().unwrap();
         let bk_path = dir.path().join("bookkeeping.json");
         let mut ops = RealOps::with_runner(dir.path(), &bk_path, FakeCommandRunner::new());
 
         ops.write_bookkeeping(&Bookkeeping {
-            expected_digest: "sha256:AAA".to_string(),
             desired_name: "v1".to_string(),
         })
         .unwrap();
@@ -586,9 +580,26 @@ mod tests {
         // silently through matching (mis)configured field names.
         let raw = fs::read_to_string(&bk_path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["expectedDigest"], "sha256:AAA");
         assert_eq!(value["desiredName"], "v1");
-        assert_eq!(value.as_object().unwrap().len(), 2);
+        assert_eq!(value.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bookkeeping_with_legacy_expected_digest_key_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bk.json");
+        std::fs::write(
+            &path,
+            r#"{"expectedDigest":"sha256:OLD","desiredName":"legacy-name"}"#,
+        )
+        .unwrap();
+        let mut ops = RealOps::with_runner(dir.path(), &path, FakeCommandRunner::new());
+        assert_eq!(
+            ops.read_bookkeeping().unwrap(),
+            Bookkeeping {
+                desired_name: "legacy-name".to_string()
+            }
+        );
     }
 
     #[test]

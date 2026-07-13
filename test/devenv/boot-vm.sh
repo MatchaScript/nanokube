@@ -67,7 +67,7 @@ exec qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
   -drive if=pflash,format=raw,file="${OVMF_VARS}" \
   -drive file="${DISK}",if=virtio,format=qcow2 \
-  -netdev user,id=net0,hostfwd=tcp::"${SSH_PORT}"-:22,hostfwd=tcp::"${AGENT_PORT}"-:9090 \
+  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${SSH_PORT}"-:22,hostfwd=tcp:127.0.0.1:"${AGENT_PORT}"-:9090 \
   -device virtio-net-pci,netdev=net0 \
   -display none \
   -serial file:"${SERIAL_LOG}" \

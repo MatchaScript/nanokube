@@ -83,11 +83,28 @@ mod tests {
     use crate::pipeline::{Bookkeeping, BootcStatus, OpsError};
 
     /// The one committed golden fixture pair under `contract/fixtures/`.
+    ///
+    /// Discovers the fixture by scanning for the single `*.json` file in
+    /// the directory instead of hardcoding its (content-derived) name, so
+    /// this test doesn't go stale whenever the fixture is regenerated.
     fn fixture_json_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            "../contract/fixtures/\
-             72512d0ec06ea6ac45ce0a3df4b22ed1dc06b7186a1281b6b0a18bb5ebd37286.json",
-        )
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contract/fixtures");
+        let candidates: Vec<PathBuf> = fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read dir {}: {e}", dir.display()))
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect();
+
+        match candidates.as_slice() {
+            [only] => only.clone(),
+            [] => panic!("no *.json fixture found in {}", dir.display()),
+            _ => panic!(
+                "expected exactly one *.json fixture in {}, found {}: {candidates:?}",
+                dir.display(),
+                candidates.len()
+            ),
+        }
     }
 
     #[derive(Default)]
@@ -112,10 +129,8 @@ mod tests {
         }
 
         fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError> {
-            self.calls.push(format!(
-                "write_bookkeeping:{}:{}",
-                bk.desired_name, bk.expected_digest
-            ));
+            self.calls
+                .push(format!("write_bookkeeping:{}", bk.desired_name));
             Ok(())
         }
 

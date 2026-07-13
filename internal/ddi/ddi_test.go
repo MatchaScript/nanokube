@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/MatchaScript/nanokube/internal/render"
@@ -16,11 +18,92 @@ import (
 // extension-release Build synthesizes.
 func testInput() BuildInput {
 	return BuildInput{
-		Name:               "testconfext",
-		ExtensionReleaseID: "fedora",
+		Name: "testconfext",
 		Files: []render.File{
 			{Path: "etc/kubernetes/kubelet-config.yaml", Content: []byte("kind: KubeletConfiguration\n")},
 		},
+	}
+}
+
+// requireTools skips locally when a build/inspect tool is missing, but
+// fails in CI: a silently skipped verification is how the mtree check
+// vanished from Step 1 (rev6 "DDI ビルドの規定").
+func requireTools(t *testing.T, tools ...string) {
+	t.Helper()
+	for _, tool := range tools {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("%s is required in CI but not found: %v", tool, err)
+			}
+			t.Skipf("%s not in PATH", tool)
+		}
+	}
+}
+
+// erofsPartitionOffset is where --make-ddi=confext places the root
+// (erofs) partition: GPT sector 40 * 512 bytes. Verified with sfdisk -J
+// against an unsigned build (systemd 259).
+const erofsPartitionOffset = "20480"
+
+func TestBuildStripsAmbientOwnershipAndMode(t *testing.T) {
+	requireTools(t, "systemd-repart", "mkfs.erofs", "dump.erofs")
+
+	// A deliberately hostile umask: without explicit chmod the 0o644
+	// file below would land as 0o600.
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	out := filepath.Join(t.TempDir(), "test.raw")
+	err := Build(BuildInput{
+		Name: "ownertest",
+		Files: []render.File{
+			{Path: "etc/test.conf", Content: []byte("k=v\n"), Mode: 0o644},
+			{Path: "etc/secret.conf", Content: []byte("s=1\n"), Mode: 0o600},
+		},
+	}, out)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for path, want := range map[string][]string{
+		"/etc/test.conf":   {"Uid: 0", "Gid: 0", "0644/rw-r--r--"},
+		"/etc/secret.conf": {"Uid: 0", "Gid: 0", "0600/rw-------"},
+	} {
+		got := dumpErofs(t, out, path)
+		for _, w := range want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: dump.erofs output missing %q:\n%s", path, w, got)
+			}
+		}
+	}
+}
+
+func dumpErofs(t *testing.T, image, path string) string {
+	t.Helper()
+	cmd := exec.Command("dump.erofs", "--offset="+erofsPartitionOffset, "--path="+path, image)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dump.erofs %s: %v: %s", path, err, out)
+	}
+	return string(out)
+}
+
+func TestBuildRejectsHalfConfiguredSigning(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "x.raw")
+	for _, in := range []BuildInput{
+		{Name: "half", PrivateKeyPath: "/nonexistent/key.pem"},
+		{Name: "half", CertificatePath: "/nonexistent/cert.crt"},
+	} {
+		err := Build(in, out)
+		if err == nil {
+			t.Errorf("Build with half-configured signing (key=%q cert=%q): want error, got nil",
+				in.PrivateKeyPath, in.CertificatePath)
+			continue
+		}
+		if errors.Is(err, ErrSystemdRepartNotFound) {
+			t.Errorf("Build with half-configured signing (key=%q cert=%q): want input-validation error, got ErrSystemdRepartNotFound (validation must run before the tool-lookup, so this test isn't vacuous on tool-less hosts): %v",
+				in.PrivateKeyPath, in.CertificatePath, err)
+		}
 	}
 }
 
@@ -100,28 +183,6 @@ func TestBuild_SystemdRepartNotFound(t *testing.T) {
 	}
 }
 
-// TestBuild_SignedNeedsBothKeyAndCert checks that a partially-set
-// signing config (only PrivateKeyPath, no CertificatePath) does not
-// engage signing: Build must still take the unsigned
-// --exclude-partitions=root-verity-sig path and succeed, rather than
-// e.g. passing --private-key alone to systemd-repart and failing.
-func TestBuild_SignedNeedsBothKeyAndCert(t *testing.T) {
-	dir := t.TempDir()
-	input := testInput()
-	input.PrivateKeyPath = filepath.Join(dir, "does-not-exist.key")
-	// CertificatePath intentionally left empty: signing must not engage.
-
-	out := filepath.Join(dir, "out.raw")
-	err := Build(input, out)
-	// With signing not engaged, this should behave exactly like the
-	// unsigned path: either skip (repart/erofs unavailable) or succeed.
-	skipIfRepartUnusable(t, err)
-
-	if _, statErr := os.Stat(out); statErr != nil {
-		t.Fatalf("stat output: %v", statErr)
-	}
-}
-
 // TestBuild_ExtensionReleaseConvention checks the extension-release
 // marker file's path and content convention in isolation (no
 // systemd-repart involved): it must live at
@@ -151,9 +212,8 @@ func TestBuild_ExtensionReleaseConvention(t *testing.T) {
 
 // TestExtensionReleaseContent_IsAlwaysAny locks in the ID=_any fix (see
 // extensionReleaseContent's doc comment for the full rationale): every
-// confext's extension-release file must declare ID=_any, regardless of
-// whatever ExtensionReleaseID a caller passes, since opting out of
-// systemd-confext's host ID/version matching entirely is what makes a
+// confext's extension-release file must declare ID=_any, since opting out
+// of systemd-confext's host ID/version matching entirely is what makes a
 // genuine, unmodified `systemd-confext refresh` (no --force) accept the
 // merge on a real host.
 func TestExtensionReleaseContent_IsAlwaysAny(t *testing.T) {

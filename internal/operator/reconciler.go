@@ -49,13 +49,6 @@ const TargetImageDigestKey = "targetImageDigest"
 // kubeadmconstants.DefaultCRISocket) exactly as before this key existed.
 const CRISocketKey = "criSocket"
 
-// extensionReleaseID is passed to ddi.Build for historical reasons but no
-// longer affects the built DDI: ddi.Build now always writes ID=_any
-// (see internal/ddi.extensionReleaseContent's doc comment for why).
-// Kept only so this call site matches contract/fixtures/gen's, which is
-// out of scope to change here.
-const extensionReleaseID = "fedora"
-
 // buildSkippedSentinel is written as DesiredMetadata.BlobSha256 when
 // ddi.Build could not run because systemd-repart (and, transitively,
 // mkfs.erofs) is missing from PATH -- the case on a bare Kind/dev host.
@@ -240,9 +233,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else {
 		blobSha256 = buildSkippedSentinel
 		buildErr := ddi.Build(ddi.BuildInput{
-			Name:               name,
-			ExtensionReleaseID: extensionReleaseID,
-			Files:              desired.Files,
+			Name:  name,
+			Files: desired.Files,
 		}, rawPath)
 		switch {
 		case buildErr == nil:

@@ -3,10 +3,11 @@
 //! `apply` takes a fully-rendered desired document (metadata + confext DDI
 //! blob, already built server-side by the operator) and reconciles the
 //! node to it: verify the blob's checksum, place + refresh the confext if
-//! it changed, bookkeep what was applied, then reconcile the booted OS
-//! image via bootc. There is no render step here and no cache of the last
-//! desired document across calls — every call is handed a fresh
-//! `DesiredMetadata` + blob and starts from what `Ops` reports on disk.
+//! it changed, record the applied name as a fact, then reconcile the
+//! booted OS image via bootc. There is no render step here and no cache
+//! of the last desired document across calls — every call is handed a
+//! fresh `DesiredMetadata` + blob and starts from what `Ops` reports on
+//! disk.
 //!
 //! `Ops` is the injectable seam for everything that touches the outside
 //! world (filesystem, systemd-confext, bootc). This module performs no
@@ -36,13 +37,14 @@ pub struct BootcStatus {
     pub staged_digest: Option<String>,
 }
 
-/// On-disk record of what the agent last applied. Field names/semantics
-/// match the abandoned Go agent's bookkeeping (JSON keys `desiredName` /
-/// `expectedDigest`), so a later task's serde impl is a straight port.
+/// On-disk record of what the agent last applied. A fact, written only
+/// after a successful place + refresh (never a prediction of what a
+/// future boot should look like — rev6 abolished the expected-digest
+/// slot). JSON key `desiredName` matches the abandoned Go agent's
+/// bookkeeping so ops.rs's serde impl stays a straight port.
 /// An empty string means "unset".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bookkeeping {
-    pub expected_digest: String,
     pub desired_name: String,
 }
 
@@ -111,22 +113,22 @@ impl From<OpsError> for ApplyError {
     }
 }
 
-/// Verifies `blob` against `desired.blob_sha256`, places + refreshes +
-/// bookkeeps it if `desired.name` differs from what's already applied
-/// (a no-op skip otherwise), then reconciles the booted OS image via
-/// bootc (skipped entirely on a non-bootc host).
+/// Verifies `blob` against `desired.blob_sha256`, places + refreshes it
+/// if `desired.name` differs from what's already applied (a no-op skip
+/// otherwise) and records the applied name, then reconciles the booted
+/// OS image via bootc (skipped entirely on a non-bootc host).
 ///
 /// On checksum mismatch, returns immediately: nothing on `ops` is called.
 pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Result<(), ApplyError> {
     verify_checksum(desired, blob)?;
 
-    let mut bk = ops.read_bookkeeping()?;
+    let bk = ops.read_bookkeeping()?;
     if bk.desired_name != desired.name {
         ops.place(&desired.name, blob)?;
         ops.refresh()?;
-        bk.desired_name = desired.name.clone();
-        bk.expected_digest = desired.target_image_digest.clone();
-        ops.write_bookkeeping(&bk)?;
+        ops.write_bookkeeping(&Bookkeeping {
+            desired_name: desired.name.clone(),
+        })?;
     }
 
     let Some(status) = ops.bootc_status()? else {
@@ -135,18 +137,12 @@ pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Resul
     };
 
     let target = desired.target_image_digest.as_str();
-    let has_staged = status.staged_digest.is_some();
-    let already_at_target = target == status.booted_digest
-        || (has_staged && status.staged_digest.as_deref() == Some(target));
+    let already_at_target =
+        target == status.booted_digest || status.staged_digest.as_deref() == Some(target);
 
     if !already_at_target {
         let image_ref = format!("{}@{}", repo_without_ref(&status.booted_image), target);
         ops.bootc_switch(&image_ref)?;
-    }
-
-    if !has_staged && !bk.expected_digest.is_empty() {
-        bk.expected_digest.clear();
-        ops.write_bookkeeping(&bk)?;
     }
 
     Ok(())
@@ -231,10 +227,8 @@ mod tests {
         }
 
         fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError> {
-            self.calls.push(format!(
-                "write_bookkeeping:{}:{}",
-                bk.desired_name, bk.expected_digest
-            ));
+            self.calls
+                .push(format!("write_bookkeeping:{}", bk.desired_name));
             self.bookkeeping = bk.clone();
             self.write_bookkeeping_calls.push(bk.clone());
             Ok(())
@@ -302,7 +296,7 @@ mod tests {
                 "read_bookkeeping".to_string(),
                 "place:v1-name".to_string(),
                 "refresh".to_string(),
-                "write_bookkeeping:v1-name:sha256:TARGET".to_string(),
+                "write_bookkeeping:v1-name".to_string(),
                 "bootc_status".to_string(),
             ]
         );
@@ -310,7 +304,6 @@ mod tests {
             ops.write_bookkeeping_calls,
             vec![Bookkeeping {
                 desired_name: "v1-name".to_string(),
-                expected_digest: "sha256:TARGET".to_string(),
             }]
         );
     }
@@ -322,7 +315,6 @@ mod tests {
         let mut ops = FakeOps {
             bookkeeping: Bookkeeping {
                 desired_name: "already-applied".to_string(),
-                expected_digest: String::new(),
             },
             bootc_status_response: Ok(Some(BootcStatus {
                 booted_image: "quay.io/foo/node:v1".to_string(),
@@ -354,7 +346,6 @@ mod tests {
         let mut ops = FakeOps {
             bookkeeping: Bookkeeping {
                 desired_name: "name".to_string(),
-                expected_digest: String::new(),
             },
             bootc_status_response: Ok(Some(BootcStatus {
                 booted_image: "quay.io/foo/node:v1".to_string(),
@@ -382,7 +373,6 @@ mod tests {
         let mut ops = FakeOps {
             bookkeeping: Bookkeeping {
                 desired_name: "name".to_string(),
-                expected_digest: String::new(),
             },
             bootc_status_response: Ok(Some(BootcStatus {
                 booted_image: "quay.io/foo/node@sha256:AAA".to_string(),
@@ -405,7 +395,6 @@ mod tests {
         let mut ops = FakeOps {
             bookkeeping: Bookkeeping {
                 desired_name: "name".to_string(),
-                expected_digest: "sha256:BBB".to_string(),
             },
             bootc_status_response: Ok(Some(BootcStatus {
                 booted_image: "quay.io/foo/node:v1".to_string(),
@@ -419,7 +408,7 @@ mod tests {
         apply(&d, blob, &mut ops).unwrap();
 
         assert!(ops.switch_targets.is_empty());
-        // Staged deployment present, so no bookkeeping clear either.
+        // name matches, so no write_bookkeeping call either.
         assert!(ops.write_bookkeeping_calls.is_empty());
     }
 
@@ -435,35 +424,6 @@ mod tests {
         assert!(ops.calls.contains(&"refresh".to_string()));
         assert!(ops.switch_targets.is_empty());
         assert_eq!(ops.calls.last(), Some(&"bootc_status".to_string()));
-    }
-
-    #[test]
-    fn bookkeeping_clear_when_nothing_staged() {
-        let blob = b"blob";
-        let d = desired("name", "sha256:AAA", blob);
-        let mut ops = FakeOps {
-            bookkeeping: Bookkeeping {
-                desired_name: "name".to_string(),
-                expected_digest: "sha256:STALE".to_string(),
-            },
-            bootc_status_response: Ok(Some(BootcStatus {
-                booted_image: "quay.io/foo/node@sha256:AAA".to_string(),
-                booted_digest: "sha256:AAA".to_string(),
-                staged_image: None,
-                staged_digest: None,
-            })),
-            ..FakeOps::default()
-        };
-
-        apply(&d, blob, &mut ops).unwrap();
-
-        assert_eq!(
-            ops.write_bookkeeping_calls,
-            vec![Bookkeeping {
-                desired_name: "name".to_string(),
-                expected_digest: String::new(),
-            }]
-        );
     }
 
     #[test]

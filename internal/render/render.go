@@ -20,6 +20,8 @@ import (
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
+
+	nanokubeadm "github.com/MatchaScript/nanokube/internal/kubeadm"
 )
 
 // KubeletConfigPath is the confext-tree-relative location of the
@@ -46,8 +48,8 @@ type Desired struct {
 }
 
 // Name returns a deterministic identifier derived from d's rendered
-// files only: sha256 over every (Path, Content) pair, sorted by Path
-// so field order never matters, hex-encoded. Equal input always
+// files only: sha256 over every (Path, Mode, Content) pair, sorted by
+// Path so field order never matters, hex-encoded. Equal input always
 // yields the same Name; changing any file's path or content always
 // yields a different one. The result is lowercase alnum only, a valid
 // systemd extension/confext version name, and doubles as the
@@ -66,6 +68,9 @@ func (d Desired) Name() string {
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	for _, f := range files {
 		writeChunk(h, []byte(f.Path))
+		var mode [4]byte
+		binary.BigEndian.PutUint32(mode[:], uint32(f.Mode))
+		writeChunk(h, mode[:])
 		writeChunk(h, f.Content)
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -101,6 +106,18 @@ func KubeletConfig(cfg *kubeadmapi.InitConfiguration) (File, error) {
 	}
 	if err := kubelet.WriteInstanceConfigToDisk(instance, scratch); err != nil {
 		return File{}, fmt.Errorf("render: kubelet instance config: %w", err)
+	}
+
+	// WriteInstanceConfigToDisk (above) only ever writes
+	// containerRuntimeEndpoint to instance-config.yaml — it silently
+	// drops every other field on the KubeletConfiguration passed to
+	// it, so ResolverConfig cannot be pinned there. Instead pin it on
+	// the ClusterConfiguration's kubelet component config, which
+	// WriteConfigToDisk (below) does marshal. The pin is shared with
+	// internal/kubeadm's ensureKubeletFiles so this render path and
+	// the transitional on-disk path stay byte-identical on any host.
+	if err := nanokubeadm.PinKubeletResolverConfig(&cfg.ClusterConfiguration); err != nil {
+		return File{}, fmt.Errorf("render: %w", err)
 	}
 
 	const patchesDir = ""

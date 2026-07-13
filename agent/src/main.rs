@@ -15,7 +15,7 @@ use clap::{Args, Parser, Subcommand};
 use nanokube_agent::apply_once::apply_once;
 use nanokube_agent::desiredpb::agent_server::AgentServer;
 use nanokube_agent::ops::RealOps;
-use nanokube_agent::server::{AgentService, RealOpsProvider};
+use nanokube_agent::server::{AgentService, MAX_DESIRED_MESSAGE_BYTES, RealOpsProvider};
 
 /// Production defaults, matching the architecture doc's stated paths
 /// (`docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md`).
@@ -114,7 +114,9 @@ fn serve(args: ServeArgs) -> ExitCode {
     rt.block_on(async move {
         println!("nanokube-agent: listening on {addr} (plaintext, dev-grade)");
         match tonic::transport::Server::builder()
-            .add_service(AgentServer::new(service))
+            .add_service(
+                AgentServer::new(service).max_decoding_message_size(MAX_DESIRED_MESSAGE_BYTES),
+            )
             .serve(addr)
             .await
         {
