@@ -18,6 +18,60 @@ import (
 	"github.com/MatchaScript/nanokube/internal/layouttest"
 )
 
+func TestCredentials_RendersPKIAndKubeconfigs(t *testing.T) {
+	cfg := defaultedInit(t)
+	creds := t.TempDir()
+	files, err := Credentials(cfg, creds)
+	if err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	byPath := map[string]File{}
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	for _, p := range []string{
+		"etc/kubernetes/pki/ca.crt",
+		"etc/kubernetes/pki/ca.key",
+		"etc/kubernetes/pki/etcd/ca.crt",
+		"etc/kubernetes/admin.conf",
+		"etc/kubernetes/controller-manager.conf",
+		"etc/kubernetes/scheduler.conf",
+		"etc/kubernetes/kubelet.conf",
+	} {
+		if _, ok := byPath[p]; !ok {
+			t.Errorf("missing %s", p)
+		}
+	}
+	if _, ok := byPath["etc/kubernetes/super-admin.conf"]; ok {
+		t.Error("super-admin.conf must NOT be in the confext (client-side credential)")
+	}
+	if m := byPath["etc/kubernetes/pki/ca.key"].Mode; m != 0o600 {
+		t.Errorf("ca.key Mode = %o, want 0600", m)
+	}
+	if m := byPath["etc/kubernetes/admin.conf"].Mode; m != 0o600 {
+		t.Errorf("admin.conf Mode = %o, want 0600", m)
+	}
+	if m := byPath["etc/kubernetes/pki/ca.crt"].Mode; m != 0o644 {
+		t.Errorf("ca.crt Mode = %o, want 0644", m)
+	}
+}
+
+func TestCredentials_StableAcrossRenders(t *testing.T) {
+	cfg := defaultedInit(t)
+	creds := t.TempDir()
+	a, err := Credentials(cfg, creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Credentials(cfg, creds) // same persistent creds dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Error("re-render with the same credentials dir must be byte-identical (EnsureAll idempotency)")
+	}
+}
+
 // defaultedInit builds a defaulted control-plane InitConfiguration, the
 // same fixture internal/boot's tests use (see boot_test.go's
 // defaultedLoaded), but returns the *kubeadmapi.InitConfiguration

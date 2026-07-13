@@ -25,7 +25,9 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
 	staticpodutil "k8s.io/kubernetes/cmd/kubeadm/app/util/staticpod"
 
+	"github.com/MatchaScript/nanokube/internal/certs"
 	nanokubeadm "github.com/MatchaScript/nanokube/internal/kubeadm"
+	"github.com/MatchaScript/nanokube/internal/layout"
 )
 
 // KubeletConfigPath is the confext-tree-relative location of the
@@ -299,5 +301,64 @@ func ControlPlaneManifests(cfg *kubeadmapi.InitConfiguration) ([]File, error) {
 		}
 		files = append(files, File{Path: ManifestsPathPrefix + n + ".yaml", Content: content, Mode: 0o644})
 	}
+	return files, nil
+}
+
+// kubeconfigNames are the node-delivered kubeconfigs. super-admin.conf
+// is deliberately absent: it is a client-side credential of init/CLI
+// with a create-use-delete lifecycle that the confext distribution
+// model cannot express (Step 2 design doc "スコープ").
+var kubeconfigNames = []string{"admin.conf", "controller-manager.conf", "scheduler.conf", "kubelet.conf"}
+
+// Credentials materializes the full PKI + kubeconfig set into credsDir
+// (the render side's persistent secret store — NOT a distribution
+// path) via certs.EnsureAll, then copies it into confext-tree Files.
+// EnsureAll preserves existing valid files, so rendering twice against
+// the same credsDir is byte-identical and the revision is stable.
+//
+// Not safe to call concurrently against the same credsDir: EnsureAll's
+// underlying kubeadm writers are check-then-write with no locking, so
+// two concurrent first-renders of a fresh credsDir can race and leave
+// a torn PKI (e.g. a CA cert paired with a different run's key). Every
+// current caller renders sequentially; a future concurrent caller
+// (e.g. an operator reconciler with MaxConcurrentReconciles > 1) must
+// serialize on credsDir itself.
+func Credentials(cfg *kubeadmapi.InitConfiguration, credsDir string) ([]File, error) {
+	l := layout.Rooted(credsDir)
+	if err := certs.NewSigner(cfg, l).EnsureAll(); err != nil {
+		return nil, fmt.Errorf("render: ensure credentials: %w", err)
+	}
+
+	var files []File
+	err := filepath.WalkDir(l.PKIDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(l.PKIDir, p)
+		if err != nil {
+			return err
+		}
+		mode := fs.FileMode(0o644)
+		if strings.HasSuffix(p, ".key") {
+			mode = 0o600
+		}
+		files = append(files, File{Path: "etc/kubernetes/pki/" + filepath.ToSlash(rel), Content: content, Mode: mode})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("render: walk pki: %w", err)
+	}
+	for _, name := range kubeconfigNames {
+		content, err := os.ReadFile(filepath.Join(l.KubernetesDir, name))
+		if err != nil {
+			return nil, fmt.Errorf("render: read kubeconfig %s: %w", name, err)
+		}
+		files = append(files, File{Path: "etc/kubernetes/" + name, Content: content, Mode: 0o600})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, nil
 }
