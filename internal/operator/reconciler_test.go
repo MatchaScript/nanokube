@@ -62,9 +62,16 @@ func (p *recordingPush) fn() PushFunc {
 // renderedName computes the same content-hash name the reconciler itself
 // derives for its default (no criSocket override) render input, so tests
 // can pre-populate outputDir at the exact path Reconcile will look at.
-func renderedName(t *testing.T) string {
+// outputDir must be the same Reconciler.OutputDir a real reconcile
+// against this input used (or will use): the name depends on the PKI
+// and kubeconfig material render.ControlPlaneDesired generates into
+// outputDir/credentials, which is why this can't be computed from cfg
+// alone. render.Credentials's EnsureAll is idempotent, so calling this
+// before or after the real Reconcile against the same outputDir yields
+// the same name either way.
+func renderedName(t *testing.T, outputDir string) string {
 	t.Helper()
-	return renderedNameForCRISocket(t, "")
+	return renderedNameForCRISocket(t, outputDir, "")
 }
 
 // renderedNameForCRISocket is renderedName generalized to an explicit
@@ -72,7 +79,7 @@ func renderedName(t *testing.T) string {
 // Reconcile itself does with CRISocketKey: an empty criSocket leaves the
 // kubeadm-defaulted cfg untouched. Lets tests compute the expected name
 // for a given ConfigMap criSocket value independently of the reconciler.
-func renderedNameForCRISocket(t *testing.T, criSocket string) string {
+func renderedNameForCRISocket(t *testing.T, outputDir, criSocket string) string {
 	t.Helper()
 	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
 	if err != nil {
@@ -81,11 +88,11 @@ func renderedNameForCRISocket(t *testing.T, criSocket string) string {
 	if criSocket != "" {
 		cfg.NodeRegistration.CRISocket = criSocket
 	}
-	kubeletFile, err := render.KubeletConfig(cfg)
+	d, err := render.ControlPlaneDesired(cfg, filepath.Join(outputDir, "credentials"))
 	if err != nil {
-		t.Fatalf("render.KubeletConfig: %v", err)
+		t.Fatalf("render.ControlPlaneDesired: %v", err)
 	}
-	return render.Desired{Files: []render.File{kubeletFile}}.Name()
+	return d.Name()
 }
 
 func TestReconcile_ConfigMapNotFound(t *testing.T) {
@@ -192,7 +199,7 @@ func TestReconcile_IdempotentOnUnchangedInput(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
 		t.Fatalf("Reconcile (1st): %v", err)
 	}
-	name := renderedName(t)
+	name := renderedName(t, outputDir)
 	jsonPath := filepath.Join(outputDir, name+".json")
 	firstWrite, err := os.ReadFile(jsonPath)
 	if err != nil {
@@ -224,11 +231,12 @@ func TestReconcile_CRISocketKeyChangesRenderedName(t *testing.T) {
 		Data:       map[string]string{CRISocketKey: criSocket},
 	}
 	push := &recordingPush{}
+	outputDir := t.TempDir()
 	r := &Reconciler{
 		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
 		ConfigMapName:      testName,
 		ConfigMapNamespace: testNamespace,
-		OutputDir:          t.TempDir(),
+		OutputDir:          outputDir,
 		Push:               push.fn(),
 	}
 
@@ -239,11 +247,11 @@ func TestReconcile_CRISocketKeyChangesRenderedName(t *testing.T) {
 		t.Fatalf("push called %d times, want 1", len(push.calls))
 	}
 
-	want := renderedNameForCRISocket(t, criSocket)
+	want := renderedNameForCRISocket(t, outputDir, criSocket)
 	if got := push.calls[0].meta.Name; got != want {
 		t.Errorf("meta.Name = %q, want %q (rendered with criSocket override)", got, want)
 	}
-	if got := push.calls[0].meta.Name; got == renderedName(t) {
+	if got := push.calls[0].meta.Name; got == renderedName(t, outputDir) {
 		t.Errorf("meta.Name = %q, same as the no-override default -- criSocket change did not affect rendered content", got)
 	}
 }
@@ -259,11 +267,12 @@ func TestReconcile_EmptyCRISocketFallsBackToDefault(t *testing.T) {
 		Data:       map[string]string{CRISocketKey: ""},
 	}
 	push := &recordingPush{}
+	outputDir := t.TempDir()
 	r := &Reconciler{
 		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
 		ConfigMapName:      testName,
 		ConfigMapNamespace: testNamespace,
-		OutputDir:          t.TempDir(),
+		OutputDir:          outputDir,
 		Push:               push.fn(),
 	}
 
@@ -273,7 +282,7 @@ func TestReconcile_EmptyCRISocketFallsBackToDefault(t *testing.T) {
 	if len(push.calls) != 1 {
 		t.Fatalf("push called %d times, want 1", len(push.calls))
 	}
-	if got, want := push.calls[0].meta.Name, renderedName(t); got != want {
+	if got, want := push.calls[0].meta.Name, renderedName(t, outputDir); got != want {
 		t.Errorf("meta.Name = %q, want %q (empty criSocket must fall back to the default render)", got, want)
 	}
 }
@@ -287,7 +296,7 @@ func TestReconcile_EmptyCRISocketFallsBackToDefault(t *testing.T) {
 // build-attempt path, produced it.
 func TestReconcile_ReusesExistingBlobWithoutRebuilding(t *testing.T) {
 	outputDir := t.TempDir()
-	name := renderedName(t)
+	name := renderedName(t, outputDir)
 
 	blob := []byte("pretend this is a confext DDI")
 	if err := os.WriteFile(filepath.Join(outputDir, name+".raw"), blob, 0o644); err != nil {
@@ -429,7 +438,7 @@ func TestReconcile_DoesNotWriteSidecarOnPushFailure(t *testing.T) {
 	if failing.calls != 1 {
 		t.Fatalf("failing push called %d times, want 1", failing.calls)
 	}
-	name := renderedName(t)
+	name := renderedName(t, outputDir)
 	jsonPath := filepath.Join(outputDir, name+".json")
 	if _, err := os.Stat(jsonPath); !os.IsNotExist(err) {
 		t.Fatalf("stat sidecar after a failed push: err = %v, want a not-exist error -- a failed push must never be recorded as done", err)
