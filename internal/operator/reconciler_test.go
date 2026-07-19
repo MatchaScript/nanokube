@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -455,6 +456,80 @@ func TestReconcile_DoesNotWriteSidecarOnPushFailure(t *testing.T) {
 	}
 	if len(retrying.calls) != 1 {
 		t.Fatalf("push called %d times on retry, want 1 (must not have been skipped as a no-op)", len(retrying.calls))
+	}
+}
+
+// TestReconcile_PropagatesFileContextsPathToDDIBuild proves
+// Reconciler.FileContextsPath actually reaches ddi.BuildInput, without
+// depending on this host having systemd-repart/mkfs.erofs installed
+// (CI and most dev hosts don't -- see isBuildToolMissing). A
+// FileContextsPath containing whitespace makes ddi.Build fail its own
+// input validation before it ever shells out to systemd-repart, so the
+// resulting error is deterministic regardless of host tooling. If
+// FileContextsPath were dropped on the way from Reconciler to
+// ddi.BuildInput, Build would instead take the tool-missing path (on a
+// bare host, the sentinel case already covered by
+// TestReconcile_RendersAndPushes) or succeed (on a host with the DDI
+// toolchain) -- neither of which is this error.
+func TestReconcile_PropagatesFileContextsPathToDDIBuild(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+	}
+	push := &recordingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          t.TempDir(),
+		FileContextsPath:   "/path with a space/file_contexts",
+		Push:               push.fn(),
+	}
+
+	_, err := r.Reconcile(context.Background(), testRequest())
+	if err == nil {
+		t.Fatal("Reconcile: want an error (invalid FileContextsPath reaching ddi.Build), got nil")
+	}
+	if !strings.Contains(err.Error(), "FileContextsPath must not contain whitespace") {
+		t.Errorf("Reconcile error = %q, want it to surface ddi.Build's FileContextsPath validation (proves the field was wired through to ddi.BuildInput)", err)
+	}
+	if len(push.calls) != 0 {
+		t.Errorf("push called %d times, want 0 (a failed build must never be pushed)", len(push.calls))
+	}
+}
+
+// TestReconcile_RejectsOversizedRenderAtRenderTime proves an oversized
+// render is rejected at render time (IMPLEMENTATION_PLAN.md §2.2: the
+// 512KiB bootstrap-Secret cap is enforced by the renderer itself, not
+// by whatever consumes the desired document downstream) rather than
+// Reconcile happily building and pushing an oversized Desired.
+// CRISocketKey is the one render input this ConfigMap-based Reconciler
+// exposes to a caller, and it flows into the rendered kubelet config
+// (see TestReconcile_CRISocketKeyChangesRenderedName), so an oversized
+// CRISocket value is the lever used here to drive the render past
+// render.MaxRenderedBytes.
+func TestReconcile_RejectsOversizedRenderAtRenderTime(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
+		Data:       map[string]string{CRISocketKey: "unix://" + strings.Repeat("a", 600<<10)},
+	}
+	push := &recordingPush{}
+	r := &Reconciler{
+		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
+		ConfigMapName:      testName,
+		ConfigMapNamespace: testNamespace,
+		OutputDir:          t.TempDir(),
+		Push:               push.fn(),
+	}
+
+	_, err := r.Reconcile(context.Background(), testRequest())
+	if err == nil {
+		t.Fatal("Reconcile: want an error from an oversized render, got nil")
+	}
+	if !strings.Contains(err.Error(), "rendered set is") {
+		t.Errorf("Reconcile error = %q, want render.MaxRenderedBytes rejection to surface", err)
+	}
+	if len(push.calls) != 0 {
+		t.Errorf("push called %d times, want 0 (an oversized render must never be pushed)", len(push.calls))
 	}
 }
 
