@@ -11,6 +11,8 @@
 // path under t.TempDir() with no global state — safe under t.Parallel().
 package layout
 
+import "path/filepath"
+
 // Layout holds every filesystem path nanokube reads or writes. Production
 // callers receive Default(); tests receive layouttest.New(t).
 type Layout struct {
@@ -23,6 +25,7 @@ type Layout struct {
 	LastEventFile  string
 	BackupsDir     string // /var/lib/nanokube/backups
 	RestoreMarker  string
+	CredentialsDir string // /var/lib/nanokube/credentials
 
 	// Kubernetes (KubernetesDir is also the kubeconfig directory)
 	KubernetesDir              string // /etc/kubernetes
@@ -49,45 +52,52 @@ type Layout struct {
 // Default returns the production layout — the canonical kubeadm +
 // nanokube on-disk locations.
 func Default() Layout {
-	const (
-		configDir = "/etc/nanokube"
-		nkVarDir  = "/var/lib/nanokube"
-		stateDir  = nkVarDir + "/state"
-		backups   = nkVarDir + "/backups"
+	return Rooted("/")
+}
 
-		kdir = "/etc/kubernetes"
-		pki  = kdir + "/pki"
-		etcd = pki + "/etcd"
-		mfs  = kdir + "/manifests"
+// Rooted returns the canonical kubeadm + nanokube layout with every path
+// rooted under root instead of "/". Default() is Rooted("/");
+// internal/layouttest.New(t) is Rooted(t.TempDir()).
+func Rooted(root string) Layout {
+	configDir := filepath.Join(root, "etc/nanokube")
+	nkVarDir := filepath.Join(root, "var/lib/nanokube")
+	stateDir := filepath.Join(nkVarDir, "state")
+	backups := filepath.Join(nkVarDir, "backups")
 
-		kubelet = "/var/lib/kubelet"
-	)
+	kdir := filepath.Join(root, "etc/kubernetes")
+	pki := filepath.Join(kdir, "pki")
+	etcdPKI := filepath.Join(pki, "etcd")
+	mfs := filepath.Join(kdir, "manifests")
+
+	kubelet := filepath.Join(root, "var/lib/kubelet")
+
 	return Layout{
 		ConfigDir:      configDir,
-		ConfigFile:     configDir + "/config.yaml",
+		ConfigFile:     filepath.Join(configDir, "config.yaml"),
 		NanoKubeVarDir: nkVarDir,
 		StateDir:       stateDir,
-		LastBootFile:   stateDir + "/last-boot.json",
-		LastEventFile:  stateDir + "/last-event",
+		LastBootFile:   filepath.Join(stateDir, "last-boot.json"),
+		LastEventFile:  filepath.Join(stateDir, "last-event"),
 		BackupsDir:     backups,
-		RestoreMarker:  backups + "/restore",
+		RestoreMarker:  filepath.Join(backups, "restore"),
+		CredentialsDir: filepath.Join(nkVarDir, "credentials"),
 
 		KubernetesDir:              kdir,
 		PKIDir:                     pki,
-		EtcdPKIDir:                 etcd,
+		EtcdPKIDir:                 etcdPKI,
 		ManifestsDir:               mfs,
-		KubeAPIServerManifest:      mfs + "/kube-apiserver.yaml",
-		AdminKubeconfig:            kdir + "/admin.conf",
-		KubeletKubeconfig:          kdir + "/kubelet.conf",
-		BootstrapKubeletKubeconfig: kdir + "/bootstrap-kubelet.conf",
-		CMKubeconfig:               kdir + "/controller-manager.conf",
-		SchedKubeconfig:            kdir + "/scheduler.conf",
-		SuperAdminKubeconfig:       kdir + "/super-admin.conf",
+		KubeAPIServerManifest:      filepath.Join(mfs, "kube-apiserver.yaml"),
+		AdminKubeconfig:            filepath.Join(kdir, "admin.conf"),
+		KubeletKubeconfig:          filepath.Join(kdir, "kubelet.conf"),
+		BootstrapKubeletKubeconfig: filepath.Join(kdir, "bootstrap-kubelet.conf"),
+		CMKubeconfig:               filepath.Join(kdir, "controller-manager.conf"),
+		SchedKubeconfig:            filepath.Join(kdir, "scheduler.conf"),
+		SuperAdminKubeconfig:       filepath.Join(kdir, "super-admin.conf"),
 
 		KubeletDir:          kubelet,
-		KubeletConfigFile:   kubelet + "/config.yaml",
-		KubeletFlagsEnvFile: kubelet + "/kubeadm-flags.env",
+		KubeletConfigFile:   filepath.Join(kubelet, "config.yaml"),
+		KubeletFlagsEnvFile: filepath.Join(kubelet, "kubeadm-flags.env"),
 
-		EtcdDataDir: "/var/lib/etcd",
+		EtcdDataDir: filepath.Join(root, "var/lib/etcd"),
 	}
 }

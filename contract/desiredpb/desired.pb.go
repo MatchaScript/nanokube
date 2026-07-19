@@ -21,21 +21,14 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Desired is the per-node desired document: rendered config (as a confext
-// DDI blob) and the target OS image digest, applied together as one atom.
-// See docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md,
+// Desired is the per-node desired document: config only, rendered as a
+// confext DDI blob. See docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md,
 // "desired は一枚のドキュメント".
 type Desired struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// name is the confext version name: a content hash of the rendered
-	// manifest (file list) that produced blob. Excludes target_image_digest
-	// so an image-only update does not trigger a DDI rebuild — see
-	// internal/render.Desired.Name().
+	// name is the content hash of the rendered file set (= revision) that
+	// produced blob — see internal/render.Desired.Name().
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// target_image_digest is the bootc image this config is meant to run
-	// under, applied alongside blob as part of the same atomic document.
-	// Not part of name's hash.
-	TargetImageDigest string `protobuf:"bytes,2,opt,name=target_image_digest,json=targetImageDigest,proto3" json:"target_image_digest,omitempty"`
 	// blob_sha256 is the sha256 of blob, for transport integrity
 	// verification independent of any dm-verity signature.
 	BlobSha256 string `protobuf:"bytes,3,opt,name=blob_sha256,json=blobSha256,proto3" json:"blob_sha256,omitempty"`
@@ -82,13 +75,6 @@ func (x *Desired) GetName() string {
 	return ""
 }
 
-func (x *Desired) GetTargetImageDigest() string {
-	if x != nil {
-		return x.TargetImageDigest
-	}
-	return ""
-}
-
 func (x *Desired) GetBlobSha256() string {
 	if x != nil {
 		return x.BlobSha256
@@ -109,12 +95,11 @@ func (x *Desired) GetBlob() []byte {
 // enough to inspect/diff, while the blob lives separately as the .raw
 // file or travels over gRPC as Desired.blob.
 type DesiredMetadata struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Name              string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	TargetImageDigest string                 `protobuf:"bytes,2,opt,name=target_image_digest,json=targetImageDigest,proto3" json:"target_image_digest,omitempty"`
-	BlobSha256        string                 `protobuf:"bytes,3,opt,name=blob_sha256,json=blobSha256,proto3" json:"blob_sha256,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	BlobSha256    string                 `protobuf:"bytes,3,opt,name=blob_sha256,json=blobSha256,proto3" json:"blob_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DesiredMetadata) Reset() {
@@ -150,13 +135,6 @@ func (*DesiredMetadata) Descriptor() ([]byte, []int) {
 func (x *DesiredMetadata) GetName() string {
 	if x != nil {
 		return x.Name
-	}
-	return ""
-}
-
-func (x *DesiredMetadata) GetTargetImageDigest() string {
-	if x != nil {
-		return x.TargetImageDigest
 	}
 	return ""
 }
@@ -223,18 +201,16 @@ var File_desired_proto protoreflect.FileDescriptor
 
 const file_desired_proto_rawDesc = "" +
 	"\n" +
-	"\rdesired.proto\x12\x13nanokube.desired.v1\"\x82\x01\n" +
+	"\rdesired.proto\x12\x13nanokube.desired.v1\"m\n" +
 	"\aDesired\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12.\n" +
-	"\x13target_image_digest\x18\x02 \x01(\tR\x11targetImageDigest\x12\x1f\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
 	"\vblob_sha256\x18\x03 \x01(\tR\n" +
 	"blobSha256\x12\x12\n" +
-	"\x04blob\x18\x04 \x01(\fR\x04blob\"v\n" +
+	"\x04blob\x18\x04 \x01(\fR\x04blobJ\x04\b\x02\x10\x03R\x13target_image_digest\"a\n" +
 	"\x0fDesiredMetadata\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12.\n" +
-	"\x13target_image_digest\x18\x02 \x01(\tR\x11targetImageDigest\x12\x1f\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
 	"\vblob_sha256\x18\x03 \x01(\tR\n" +
-	"blobSha256\"8\n" +
+	"blobSha256J\x04\b\x02\x10\x03R\x13target_image_digest\"8\n" +
 	"\x13PushDesiredResponse\x12!\n" +
 	"\fdesired_name\x18\x01 \x01(\tR\vdesiredName2^\n" +
 	"\x05Agent\x12U\n" +

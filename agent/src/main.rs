@@ -27,7 +27,7 @@ const DEFAULT_BOOKKEEPING_PATH: &str = "/var/lib/nanokube/state/agent-bookkeepin
 #[command(
     name = "nanokube-agent",
     version,
-    about = "nanokube node agent: applies desired documents (confext DDI + bootc stage)"
+    about = "nanokube node agent: applies desired documents (confext DDI)"
 )]
 struct Cli {
     #[command(subcommand)]

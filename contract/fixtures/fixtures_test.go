@@ -16,11 +16,6 @@ import (
 	"github.com/MatchaScript/nanokube/internal/render"
 )
 
-// placeholderImageDigest must match contract/fixtures/gen/main.go's
-// constant exactly — this is the same canonical fixture input, not a
-// real digest.
-var placeholderImageDigest = "sha256:" + strings.Repeat("0", 64)
-
 // TestFixture_RawMatchesMetadata is the core drift check: it needs
 // neither systemd-repart nor mkfs.erofs, so it runs on any host. It
 // catches a <name>.raw regenerated without its <name>.json (or vice
@@ -44,8 +39,7 @@ func TestFixture_RawMatchesMetadata(t *testing.T) {
 		t.Fatalf("render.KubeletConfig: %v", err)
 	}
 	desired := render.Desired{
-		ImageDigest: placeholderImageDigest,
-		Files:       []render.File{kubeletFile},
+		Files: []render.File{kubeletFile},
 	}
 	wantName := desired.Name()
 

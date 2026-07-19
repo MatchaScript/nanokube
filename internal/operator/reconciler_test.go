@@ -33,8 +33,6 @@ func TestMain(m *testing.M) {
 const (
 	testName      = "nanokube-desired-input"
 	testNamespace = "default"
-	testDigest1   = "sha256:deadbeef1"
-	testDigest2   = "sha256:deadbeef2"
 )
 
 func testRequest() ctrl.Request {
@@ -119,7 +117,6 @@ func TestReconcile_IgnoresUnrelatedObject(t *testing.T) {
 	// "not found", is what gates work.
 	other := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "some-other-configmap", Namespace: "kube-system"},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	r := &Reconciler{
 		Client:             fake.NewClientBuilder().WithObjects(other).Build(),
@@ -138,33 +135,10 @@ func TestReconcile_IgnoresUnrelatedObject(t *testing.T) {
 	}
 }
 
-func TestReconcile_NoDigestKey(t *testing.T) {
-	push := &recordingPush{}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{"unrelated": "value"},
-	}
-	r := &Reconciler{
-		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
-		ConfigMapName:      testName,
-		ConfigMapNamespace: testNamespace,
-		OutputDir:          t.TempDir(),
-		Push:               push.fn(),
-	}
-
-	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if len(push.calls) != 0 {
-		t.Errorf("push called %d times, want 0 (no targetImageDigest key)", len(push.calls))
-	}
-}
-
 func TestReconcile_RendersAndPushes(t *testing.T) {
 	push := &recordingPush{}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	r := &Reconciler{
 		Client:             fake.NewClientBuilder().WithObjects(cm).Build(),
@@ -184,9 +158,6 @@ func TestReconcile_RendersAndPushes(t *testing.T) {
 	if got.Name == "" {
 		t.Error("meta.Name is empty")
 	}
-	if got.TargetImageDigest != testDigest1 {
-		t.Errorf("meta.TargetImageDigest = %q, want %q", got.TargetImageDigest, testDigest1)
-	}
 	// This dev host lacks mkfs.erofs (confirmed separately), so the
 	// realistic outcome here is the documented sentinel. If some other
 	// host in CI *does* have the DDI toolchain, a real hex sha256 is
@@ -202,7 +173,6 @@ func TestReconcile_RendersAndPushes(t *testing.T) {
 func TestReconcile_IdempotentOnUnchangedInput(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	outputDir := t.TempDir()
 	r := &Reconciler{
@@ -241,67 +211,17 @@ func TestReconcile_IdempotentOnUnchangedInput(t *testing.T) {
 	}
 }
 
-func TestReconcile_DetectsDigestChange(t *testing.T) {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
-	}
-	cl := fake.NewClientBuilder().WithObjects(cm).Build()
-	push := &recordingPush{}
-	r := &Reconciler{
-		Client:             cl,
-		ConfigMapName:      testName,
-		ConfigMapNamespace: testNamespace,
-		OutputDir:          t.TempDir(),
-		Push:               push.fn(),
-	}
-
-	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
-		t.Fatalf("Reconcile (digest1): %v", err)
-	}
-	if len(push.calls) != 1 {
-		t.Fatalf("push called %d times after 1st reconcile, want 1", len(push.calls))
-	}
-
-	// Same name/namespace, only the digest changes -- render.Desired.Name
-	// deliberately excludes the digest from its hash (an image-only
-	// update must not force a DDI rebuild), so this is the one input
-	// change that can slip past a naive "does <name>.json already exist"
-	// check. Confirms it doesn't: push must fire again with the new
-	// digest, not be swallowed as "already up to date".
-	cm.Data[TargetImageDigestKey] = testDigest2
-	if err := cl.Update(context.Background(), cm); err != nil {
-		t.Fatalf("update configmap: %v", err)
-	}
-
-	if _, err := r.Reconcile(context.Background(), testRequest()); err != nil {
-		t.Fatalf("Reconcile (digest2): %v", err)
-	}
-	if len(push.calls) != 2 {
-		t.Fatalf("push called %d times after digest change, want 2", len(push.calls))
-	}
-	if push.calls[0].meta.Name != push.calls[1].meta.Name {
-		t.Errorf("name changed across a digest-only update: %q vs %q (should be stable)",
-			push.calls[0].meta.Name, push.calls[1].meta.Name)
-	}
-	if push.calls[1].meta.TargetImageDigest != testDigest2 {
-		t.Errorf("2nd push TargetImageDigest = %q, want %q", push.calls[1].meta.TargetImageDigest, testDigest2)
-	}
-}
-
-// TestReconcile_CRISocketKeyChangesRenderedName is the CRISocketKey
-// counterpart to TestReconcile_DetectsDigestChange: unlike the digest
-// (deliberately excluded from Desired.Name's hash), a criSocket override
-// actually changes the rendered kubelet config bytes (it flows into the
-// kubelet instance config patch render.KubeletConfig writes), so it must
-// change Desired.Name() too. Confirms the pushed name matches an
-// independently-computed renderedNameForCRISocket, and differs from the
-// no-override default name.
+// TestReconcile_CRISocketKeyChangesRenderedName confirms that a
+// criSocket override actually changes the rendered kubelet config bytes
+// (it flows into the kubelet instance config patch render.KubeletConfig
+// writes), so it must change Desired.Name() too: the pushed name must
+// match an independently-computed renderedNameForCRISocket, and differ
+// from the no-override default name.
 func TestReconcile_CRISocketKeyChangesRenderedName(t *testing.T) {
 	const criSocket = "unix:///var/run/crio/crio.sock"
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1, CRISocketKey: criSocket},
+		Data:       map[string]string{CRISocketKey: criSocket},
 	}
 	push := &recordingPush{}
 	r := &Reconciler{
@@ -336,7 +256,7 @@ func TestReconcile_CRISocketKeyChangesRenderedName(t *testing.T) {
 func TestReconcile_EmptyCRISocketFallsBackToDefault(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1, CRISocketKey: ""},
+		Data:       map[string]string{CRISocketKey: ""},
 	}
 	push := &recordingPush{}
 	r := &Reconciler{
@@ -378,7 +298,6 @@ func TestReconcile_ReusesExistingBlobWithoutRebuilding(t *testing.T) {
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	push := &recordingPush{}
 	r := &Reconciler{
@@ -415,9 +334,8 @@ func TestNewLocalPush_DoesNotWriteSidecar(t *testing.T) {
 	push := NewLocalPush(outputDir, "127.0.0.1:9090")
 
 	meta := &desiredpb.DesiredMetadata{
-		Name:              "abc123",
-		TargetImageDigest: testDigest1,
-		BlobSha256:        buildSkippedSentinel,
+		Name:       "abc123",
+		BlobSha256: buildSkippedSentinel,
 	}
 	rawPath := filepath.Join(outputDir, "abc123.raw") // deliberately absent
 	if err := push(context.Background(), meta, rawPath); err != nil {
@@ -441,7 +359,6 @@ func TestNewLocalPush_DoesNotWriteSidecar(t *testing.T) {
 func TestReconcile_IdempotentAcrossPushModes(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	push := &recordingPush{}
 	r := &Reconciler{
@@ -495,7 +412,6 @@ func (p *failingPush) fn() PushFunc {
 func TestReconcile_DoesNotWriteSidecarOnPushFailure(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNamespace},
-		Data:       map[string]string{TargetImageDigestKey: testDigest1},
 	}
 	outputDir := t.TempDir()
 	failing := &failingPush{}

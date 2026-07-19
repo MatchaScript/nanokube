@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/MatchaScript/nanokube/internal/render"
 )
@@ -45,6 +46,14 @@ type BuildInput struct {
 	// architecture rev5 — signing is opt-in).
 	PrivateKeyPath  string
 	CertificatePath string
+
+	// FileContextsPath, when non-empty, is an SELinux file_contexts
+	// database passed to mkfs.erofs so every inode gets its
+	// security.selinux xattr at build time (Step 2 design doc "SELinux
+	// ラベル規定" — Flatcar precedent: label at build, never restorecon
+	// on the node, since the DDI is immutable and (eventually) signed).
+	// Empty means no labeling (non-SELinux dev hosts).
+	FileContextsPath string
 }
 
 // Build renders input into a confext DDI (.raw) at outputPath by
@@ -54,6 +63,17 @@ type BuildInput struct {
 func Build(input BuildInput, outputPath string) error {
 	if (input.PrivateKeyPath != "") != (input.CertificatePath != "") {
 		return fmt.Errorf("ddi: signing requires both PrivateKeyPath and CertificatePath, got only one (a silent unsigned build would break the all-generations-signed transition condition)")
+	}
+
+	if strings.ContainsAny(input.FileContextsPath, " \t\n\r") {
+		// SYSTEMD_REPART_MKFS_OPTIONS_EROFS is re-split by systemd-repart
+		// on raw whitespace with no quoting support (mkfs_options_from_env
+		// -> strv_split_full(..., EXTRACT_RETAIN_ESCAPE), which does not
+		// set EXTRACT_KEEP_QUOTE/EXTRACT_UNQUOTE): a path containing
+		// whitespace would silently split into multiple argv elements
+		// and corrupt the mkfs.erofs invocation instead of failing
+		// clearly. Reject it here instead.
+		return fmt.Errorf("ddi: FileContextsPath must not contain whitespace (systemd-repart's env-var option passing has no quoting): %q", input.FileContextsPath)
 	}
 
 	if _, err := exec.LookPath("systemd-repart"); err != nil {
@@ -116,8 +136,12 @@ func Build(input BuildInput, outputPath string) error {
 	// --all-root forces uid/gid 0, -T 0 + SOURCE_DATE_EPOCH pin
 	// timestamps. Verified against systemd 259 + erofs-utils 1.9.1: without
 	// these the build uid is baked into every inode.
+	mkfsOpts := "--all-root -T 0"
+	if input.FileContextsPath != "" {
+		mkfsOpts += " --file-contexts=" + input.FileContextsPath
+	}
 	cmd.Env = append(os.Environ(),
-		"SYSTEMD_REPART_MKFS_OPTIONS_EROFS=--all-root -T 0",
+		"SYSTEMD_REPART_MKFS_OPTIONS_EROFS="+mkfsOpts,
 		"SOURCE_DATE_EPOCH=0",
 	)
 	var out bytes.Buffer

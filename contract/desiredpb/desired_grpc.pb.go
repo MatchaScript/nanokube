@@ -32,9 +32,9 @@ const (
 // or self-signed) — mTLS/PKI hardening is Step 5.
 type AgentClient interface {
 	// PushDesired delivers a new desired document for the agent to apply:
-	// blob sha256 verification, confext placement + refresh, bookkeeping,
-	// then bootc stage, in that order (see internal/ddi and the agent's
-	// own apply pipeline). Idempotent: pushing a Desired whose name matches
+	// blob sha256 verification, confext placement + refresh, then
+	// bookkeeping, in that order (see internal/ddi and the agent's own
+	// apply pipeline). Idempotent: pushing a Desired whose name matches
 	// what's already applied is a no-op success.
 	PushDesired(ctx context.Context, in *Desired, opts ...grpc.CallOption) (*PushDesiredResponse, error)
 }
@@ -67,9 +67,9 @@ func (c *agentClient) PushDesired(ctx context.Context, in *Desired, opts ...grpc
 // or self-signed) — mTLS/PKI hardening is Step 5.
 type AgentServer interface {
 	// PushDesired delivers a new desired document for the agent to apply:
-	// blob sha256 verification, confext placement + refresh, bookkeeping,
-	// then bootc stage, in that order (see internal/ddi and the agent's
-	// own apply pipeline). Idempotent: pushing a Desired whose name matches
+	// blob sha256 verification, confext placement + refresh, then
+	// bookkeeping, in that order (see internal/ddi and the agent's own
+	// apply pipeline). Idempotent: pushing a Desired whose name matches
 	// what's already applied is a no-op success.
 	PushDesired(context.Context, *Desired) (*PushDesiredResponse, error)
 	mustEmbedUnimplementedAgentServer()

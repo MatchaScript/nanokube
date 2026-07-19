@@ -54,10 +54,9 @@ func NewGRPCPush(agentAddr string) PushFunc {
 
 		client := desiredpb.NewAgentClient(conn)
 		resp, err := client.PushDesired(ctx, &desiredpb.Desired{
-			Name:              meta.Name,
-			TargetImageDigest: meta.TargetImageDigest,
-			BlobSha256:        meta.BlobSha256,
-			Blob:              blob,
+			Name:       meta.Name,
+			BlobSha256: meta.BlobSha256,
+			Blob:       blob,
 		})
 		if err != nil {
 			return fmt.Errorf("operator: PushDesired to %s: %w", agentAddr, err)

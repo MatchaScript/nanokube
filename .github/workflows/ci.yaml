@@ -90,9 +90,18 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: quay.io/fedora/fedora:42
+      # SYS_ADMIN: TestBuildAppliesSELinuxLabels reads back a built
+      # image's baked-in security.selinux xattr via fsck.erofs --extract
+      # --xattrs, which itself calls setxattr("security.selinux", ...)
+      # on the extracted files. The kernel's generic security.* xattr
+      # write fallback (cap_inode_setxattr, taken whenever no LSM claims
+      # the write more specifically -- the case here, since this runner
+      # has no active SELinux) requires CAP_SYS_ADMIN; without it every
+      # extraction fails with EPERM.
+      options: --cap-add SYS_ADMIN
     steps:
       - name: Install build dependencies
-        run: dnf install -y systemd-container systemd-udev erofs-utils gcc --setopt=install_weak_deps=False -q
+        run: dnf install -y systemd-container systemd-udev erofs-utils gcc selinux-policy-targeted libselinux-utils --setopt=install_weak_deps=False -q
 
       - uses: actions/checkout@v4
 

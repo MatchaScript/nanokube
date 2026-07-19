@@ -36,11 +36,6 @@ import (
 	"github.com/MatchaScript/nanokube/internal/render"
 )
 
-// TargetImageDigestKey is the ConfigMap Data key the reconciler reads as
-// the Step 1 stand-in for CRD-resolved digest input (Step 4 adds the
-// real CRD + northbound API; see the architecture doc's "CRD" section).
-const TargetImageDigestKey = "targetImageDigest"
-
 // CRISocketKey is the ConfigMap Data key the reconciler reads to override
 // cfg.NodeRegistration.CRISocket before rendering the kubelet config —
 // the Step 1 stand-in for a real kubelet config parameter input (実装項目
@@ -171,12 +166,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("operator: get configmap: %w", err)
 	}
 
-	targetImageDigest := cm.Data[TargetImageDigestKey]
-	if targetImageDigest == "" {
-		logger.Info("configmap has no targetImageDigest, nothing to do", "key", TargetImageDigestKey)
-		return ctrl.Result{}, nil
-	}
-
 	// Render is a pure function of (kubeadm's static defaults, this
 	// process's environment) for this skeleton -- there is no per-node
 	// variance yet -- so it is cheap and side-effect-free to always run,
@@ -193,25 +182,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("operator: render.KubeletConfig: %w", err)
 	}
-	desired := render.Desired{ImageDigest: targetImageDigest, Files: []render.File{kubeletFile}}
+	desired := render.Desired{Files: []render.File{kubeletFile}}
 	name := desired.Name()
-	logger.Info("rendered desired document", "name", name, "targetImageDigest", targetImageDigest)
+	logger.Info("rendered desired document", "name", name)
 
 	rawPath := filepath.Join(r.OutputDir, name+".raw")
 	jsonPath := filepath.Join(r.OutputDir, name+".json")
 
-	// The document Push actually delivers is (name, targetImageDigest)
-	// together -- name alone is not the full story, because
-	// render.Desired.Name() deliberately excludes the digest (see its
-	// doc comment: an image-only update must not force a DDI rebuild).
-	// So "nothing to do at all" has to be checked against both: if the
-	// sidecar already on disk for this name was written for this same
-	// digest, this is a true no-op repeat, mirroring internal/agent's
-	// content-hash-identity-needs-no-extra-tracking principle without
-	// losing digest-only changes to it. A missing or unparseable sidecar
-	// just means "not up to date" -- rebuilt below like any first run.
-	if existing, ok := readExistingMetadata(jsonPath); ok && existing.GetTargetImageDigest() == targetImageDigest {
-		logger.Info("already up to date, skipping build and push", "name", name, "targetImageDigest", targetImageDigest)
+	// Push necessity is revision matching: if the sidecar already on
+	// disk carries this same name, this is a true no-op repeat (see
+	// ARCHITECTURE.md "agent の適用と状態報告" -- push の要否は報告
+	// revision ≠ desired revision). A missing or unparseable sidecar just
+	// means "not up to date" -- rebuilt below like any first run.
+	if existing, ok := readExistingMetadata(jsonPath); ok && existing.GetName() == name {
+		logger.Info("already up to date, skipping build and push", "name", name)
 		return ctrl.Result{}, nil
 	}
 
@@ -225,8 +209,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// reconcile (its content is a pure function of desired.Files,
 		// which name already hashes over) -- rebuilding would only
 		// reproduce the same bytes, so reuse it instead of re-invoking
-		// systemd-repart. This is exactly the case a digest-only
-		// ConfigMap update hits: same confext content, new target image.
+		// systemd-repart.
 		sum := sha256.Sum256(raw)
 		blobSha256 = hex.EncodeToString(sum[:])
 		logger.Info("DDI already built for this name, reusing it", "name", name, "rawPath", rawPath, "bytes", len(raw))
@@ -260,9 +243,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	meta := &desiredpb.DesiredMetadata{
-		Name:              name,
-		TargetImageDigest: targetImageDigest,
-		BlobSha256:        blobSha256,
+		Name:       name,
+		BlobSha256: blobSha256,
 	}
 	if err := r.Push(ctx, meta, rawPath); err != nil {
 		return ctrl.Result{}, fmt.Errorf("operator: push: %w", err)
