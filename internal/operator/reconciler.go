@@ -122,9 +122,17 @@ type Reconciler struct {
 	ConfigMapName      string
 	ConfigMapNamespace string
 	// OutputDir is where the built <name>.raw lands and where the
-	// up-to-date check below looks for <name>.json.
+	// up-to-date check below looks for <name>.json. It is also the
+	// parent of credsDir (see Reconcile), the operator's persistent PKI
+	// store.
 	OutputDir string
-	Push      PushFunc
+	// FileContextsPath, when non-empty, is passed through to
+	// ddi.BuildInput.FileContextsPath so the built DDI carries build-time
+	// SELinux labels (IMPLEMENTATION_PLAN.md §6). Empty means no
+	// labeling. cmd/nanokube-operator wires this from the
+	// NANOKUBE_FILE_CONTEXTS environment variable.
+	FileContextsPath string
+	Push             PushFunc
 }
 
 // SetupWithManager registers r against mgr, watching ConfigMaps only.
@@ -166,11 +174,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("operator: get configmap: %w", err)
 	}
 
-	// Render is a pure function of (kubeadm's static defaults, this
-	// process's environment) for this skeleton -- there is no per-node
-	// variance yet -- so it is cheap and side-effect-free to always run,
-	// which is also how the confext version name (a content hash of the
-	// rendered files) is discovered in the first place.
+	// Render is deterministic given (kubeadm's static defaults, this
+	// process's environment, and whatever credsDir already holds) for
+	// this skeleton -- there is no per-node variance yet -- so it is
+	// safe to always run, which is also how the confext version name (a
+	// content hash of the rendered files) is discovered in the first
+	// place. Unlike the Step 1 kubelet-config-only render this replaces,
+	// render.ControlPlaneDesired is not side-effect-free: it writes PKI
+	// and kubeconfig material into credsDir (render.Credentials). That
+	// write is idempotent -- EnsureAll preserves existing valid files --
+	// so repeated renders of the same input still converge to the same
+	// bytes and the same Name().
 	cfg, err := kubeadmconfig.DefaultedStaticInitConfiguration()
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("operator: DefaultedStaticInitConfiguration: %w", err)
@@ -178,11 +192,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if criSocket := cm.Data[CRISocketKey]; criSocket != "" {
 		cfg.NodeRegistration.CRISocket = criSocket
 	}
-	kubeletFile, err := render.KubeletConfig(cfg)
+	// credsDir is the operator's persistent PKI/kubeconfig store -- a
+	// stand-in until Step 5 decides how CP secrets are actually held.
+	// It must stay the same path across reconciles (and process
+	// restarts) for the cluster's CA identity to stay stable; nesting it
+	// under OutputDir is what makes that automatic here.
+	credsDir := filepath.Join(r.OutputDir, "credentials")
+	desired, err := render.ControlPlaneDesired(cfg, credsDir)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("operator: render.KubeletConfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("operator: render.ControlPlaneDesired: %w", err)
 	}
-	desired := render.Desired{Files: []render.File{kubeletFile}}
 	name := desired.Name()
 	logger.Info("rendered desired document", "name", name)
 
@@ -216,8 +235,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else {
 		blobSha256 = buildSkippedSentinel
 		buildErr := ddi.Build(ddi.BuildInput{
-			Name:  name,
-			Files: desired.Files,
+			Name:             name,
+			Files:            desired.Files,
+			FileContextsPath: r.FileContextsPath,
 		}, rawPath)
 		switch {
 		case buildErr == nil:

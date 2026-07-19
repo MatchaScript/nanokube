@@ -60,11 +60,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// NANOKUBE_FILE_CONTEXTS names an SELinux file_contexts database
+	// (e.g. /etc/selinux/targeted/contexts/files/file_contexts) to bake
+	// build-time labels into every built DDI (IMPLEMENTATION_PLAN.md §6).
+	// Unset means no labeling, matching non-SELinux dev hosts.
+	fileContextsPath := os.Getenv("NANOKUBE_FILE_CONTEXTS")
+
 	r := &operator.Reconciler{
 		Client:             mgr.GetClient(),
 		ConfigMapName:      configMapName,
 		ConfigMapNamespace: configMapNamespace,
 		OutputDir:          outputDir,
+		FileContextsPath:   fileContextsPath,
 		Push:               push,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
@@ -78,6 +85,7 @@ func main() {
 		"outputDir", outputDir,
 		"agentAddr", agentAddr,
 		"pushMode", pushMode,
+		"fileContextsPath", fileContextsPath,
 	)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
