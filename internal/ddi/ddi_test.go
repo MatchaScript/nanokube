@@ -327,19 +327,28 @@ func matchpathconContext(t *testing.T, fileContexts, path string) string {
 //
 // The extraction's setxattr requires CAP_SYS_ADMIN (the kernel's
 // generic security.* xattr-write fallback, cap_inode_setxattr, absent
-// a more specific LSM hook) and, on an SELinux-enforcing host, also
-// requires the caller's domain to be unconfined enough to relabel to
-// an arbitrary target type — confirmed by reproducing both failure
-// modes in a local verification container. The ddi CI job runs on a
-// non-SELinux Ubuntu host, so only the capability applies there; its
-// container is granted --cap-add=SYS_ADMIN accordingly (ci.yaml).
+// a more specific LSM hook) — the ddi CI job's container is granted
+// --cap-add=SYS_ADMIN accordingly (ci.yaml) — and a destination
+// filesystem that accepts security.selinux writes. On an
+// SELinux-enabled podman host, the container's own overlay rootfs is
+// not such a filesystem: writing security.selinux to it fails with
+// ENOTSUP at every privilege level (rootless and rootful, --privileged
+// included), while the same write to a bind-mounted host directory
+// succeeds even rootless with SYS_ADMIN + label=disable. Verified
+// 2026-07-19 on a Fedora SELinux-Enforcing host; full reproduction
+// matrix in the workspace report docs/nanokube/reports/selinux.md.
+// CI (ubuntu-24.04, no SELinux) writes to the container overlay
+// without issue given the capability.
 //
-// Do not use a local dev host running SELinux Enforcing to sanity-check
-// this test: reproduced failing there with EPERM at this exact
-// extraction step in both rootless and rootful podman, --cap-add
-// SYS_ADMIN and --security-opt label=disable notwithstanding. Real CI
-// (PR #30, ubuntu-24.04, no SELinux) passes. Treat a local failure on
-// such a host as expected, not as a regression signal.
+// So this test IS locally reproducible on an SELinux-Enforcing dev
+// host: point TMPDIR at a bind-mounted host directory so t.TempDir()
+// lands outside the overlay — recipe in README "Running the
+// internal/ddi tests locally". (An earlier version of this comment
+// declared local reproduction impossible, citing EPERM from this
+// extraction step; the 2026-07-19 reproduction observed only ENOTSUP
+// on the overlay path. The EPERM record plausibly came from runs
+// without label=disable — an SELinux denial rather than the
+// filesystem refusal — but that hypothesis is unverified.)
 func erofsXattr(t *testing.T, image, pathInImage, name string) string {
 	t.Helper()
 	dir := t.TempDir()

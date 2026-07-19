@@ -128,3 +128,33 @@ nanokube reset --yes
 ```
 
 Then mint a fresh token on the control plane and re-run `add-node`.
+
+## Development
+
+### Running the internal/ddi tests locally
+
+`internal/ddi` shells out to `systemd-repart --make-ddi=confext` and
+erofs-utils, so its tests run inside a Fedora container (mirroring the
+CI `ddi` job) rather than on the host toolchain. From the repo root:
+
+```
+WORK=$(mktemp -d ~/.cache/nanokube-ddi.XXXXXX)
+podman run --rm --cap-add SYS_ADMIN --security-opt label=disable \
+  -v "$WORK":/work -e TMPDIR=/work \
+  -e GOCACHE=/work/gocache -e GOMODCACHE=/work/gomod -e GOFLAGS=-buildvcs=false \
+  -v "$PWD":/src:ro -w /src \
+  quay.io/fedora/fedora:42 \
+  bash -c 'dnf install -y -q golang systemd-udev erofs-utils selinux-policy-targeted libselinux-utils && go test -count=1 -v ./internal/ddi/...'
+```
+
+Rootless podman is sufficient; no sudo.
+
+The `TMPDIR` redirection is what makes `TestBuildAppliesSELinuxLabels`
+pass on an SELinux-enabled host: the test reads back baked-in
+`security.selinux` xattrs via `fsck.erofs --extract --xattrs`, and that
+write is rejected with ENOTSUP on the container's own overlay rootfs at
+any privilege level, while a bind-mounted host directory accepts it
+(see the `erofsXattr` comment in `internal/ddi/ddi_test.go`). Use a
+directory on a persistent filesystem such as `~/.cache`, not `/tmp`.
+`GOFLAGS=-buildvcs=false` is needed because the read-only source mount
+hides `.git` from `go build`.
