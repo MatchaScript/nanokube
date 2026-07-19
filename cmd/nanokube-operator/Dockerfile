@@ -21,6 +21,14 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/nanokube-operator ./cmd/nanokube-operator
 
 FROM registry.fedoraproject.org/fedora-minimal:latest
-RUN dnf install -y systemd-container systemd-udev erofs-utils --setopt=install_weak_deps=False -q && dnf clean all
+# selinux-policy-targeted + container-selinux: file_contexts source for the
+# DDI's build-time relabeling (internal/ddi.Build passes this image's
+# /etc/selinux/targeted/contexts/files/file_contexts to mkfs.erofs
+# --file-contexts, via NANOKUBE_FILE_CONTEXTS). The
+# /etc/kubernetes(/.*)? -> kubernetes_file_t rule specifically comes from
+# container-selinux, not selinux-policy-targeted itself; without it every
+# file under /etc/kubernetes in the built confext is mislabeled etc_t and
+# the node's restorecon disagrees with what the agent placed.
+RUN dnf install -y systemd-container systemd-udev erofs-utils selinux-policy-targeted container-selinux --setopt=install_weak_deps=False -q && dnf clean all
 COPY --from=build /out/nanokube-operator /usr/bin/nanokube-operator
 ENTRYPOINT ["/usr/bin/nanokube-operator"]
