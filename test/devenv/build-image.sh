@@ -82,6 +82,13 @@ podman build \
   -f "${SCRIPT_DIR}/image/Containerfile" \
   "${SCRIPT_DIR}/image"
 
+# erofs-utils (added to the Containerfile's package list) and
+# selinux-policy-targeted (expected from the fedora-bootc base) are both
+# required for on-node DDI builds and SELinux label verification
+# (nanokube Step 2 Task 12 / Step 3 Task B). Verify rootlessly against the
+# image just built rather than trusting the package list silently.
+podman run --rm "${IMAGE_TAG}" rpm -q erofs-utils selinux-policy-targeted
+
 echo "== [3/5] ensure local registry + push =="
 "${SCRIPT_DIR}/start-registry.sh"
 podman tag "${IMAGE_TAG}" "${REGISTRY_TAG}"
