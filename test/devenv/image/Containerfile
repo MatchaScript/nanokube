@@ -5,11 +5,20 @@
 #   - homelab/containers/bootc/base/fedora.Containerfile        (base: fedora-bootc)
 #   - homelab/containers/bootc/kubernetes/base.Containerfile    (kubelet/kubeadm v1.35, cri-o, greenboot)
 #
-# PLUS exactly one intentional devenv-only patch (confirmed with the user):
-#   the kubelet.service drop-in --config flag points at
-#   /etc/kubernetes/kubelet-config.yaml instead of the kubeadm default
-#   (/var/lib/kubelet/config.yaml). See overlay/usr/lib/systemd/system/
-#   kubelet.service.d/10-kubeadm.conf.
+# PLUS two intentional devenv-only patches to the kubelet.service drop-in
+# (confirmed with the user), both in overlay/usr/lib/systemd/system/
+# kubelet.service.d/10-kubeadm.conf:
+#   - --config points at /etc/kubernetes/kubelet-config.yaml instead of the
+#     kubeadm default (/var/lib/kubelet/config.yaml).
+#   - EnvironmentFile points at /etc/kubernetes/kubeadm-flags.env instead of
+#     the kubeadm default (/var/lib/kubelet/kubeadm-flags.env): confext only
+#     merges into /etc, so the server-rendered flags env (nanokube Step 2)
+#     has to live there too (nanokube Step 2 Task 12).
+#
+# PLUS erofs-utils (mkfs.erofs/fsck.erofs, not in the homelab lineage's
+# package list): needed on-node once init drives confext DDI builds locally
+# (nanokube Step 2 Task 12; not yet exercised by this image -- see
+# test/devenv/README.md).
 #
 # PLUS the nanokube-agent deliverable itself (Step 1 item 1's residual work):
 #   the release binary built from agent/ (by build-image.sh, into
@@ -59,6 +68,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     kubectl \
     crun \
     container-selinux \
+    erofs-utils \
     libseccomp \
     dbus-daemon \
     tuned \

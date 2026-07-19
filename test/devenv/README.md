@@ -47,10 +47,17 @@ production images (read-only references, never modified):
   v1.35, cri-o, greenboot, same package list and cri-o/kubernetes repo
   definitions)
 
-Plus exactly one intentional devenv-only patch (confirmed with the user):
-`image/overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf` sets
+Plus two intentional devenv-only patches (confirmed with the user), both in
+`image/overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf`:
 `--config=/etc/kubernetes/kubelet-config.yaml` instead of the kubeadm default
-(`/var/lib/kubelet/config.yaml`).
+(`/var/lib/kubelet/config.yaml`), and (nanokube Step 2 Task 12)
+`EnvironmentFile=-/etc/kubernetes/kubeadm-flags.env` instead of the kubeadm
+default (`/var/lib/kubelet/kubeadm-flags.env`) -- confext only merges into
+`/etc`, so the server-rendered flags env has to live there too.
+
+Plus `erofs-utils` (nanokube Step 2 Task 12), needed on-node once `nanokube
+init` drives confext DDI builds locally; not yet exercised by this image
+(see "devenv image follow-up" below).
 
 Everything else under `image/overlay/` is devenv-only provisioning glue with
 no equivalent in the homelab repo (that repo's real-hardware bootstrap is a
@@ -335,6 +342,72 @@ the pre-`--force` binary" -- that's exactly why this section verifies by greppin
 actual bytes of the binary on disk and of the live `/proc/1119/exe`, rather than by
 process/uptime continuity. That direct-content check is unaffected by the reboot and is
 what the 実装項目6.b/c closure above actually rests on.
+
+## devenv image follow-up (2026-07-19): nanokube Step 2 Task 12
+
+Booted image + baked-in agent had been stuck at the 2026-07-06 build (see
+above), predating the Step 2 render changes (`target_image_digest` removal,
+`internal/operator` reconciler full-render -- Step 2 Task 11) and the
+`/var/lib` problem (confext only merges into `/etc`, but the kubelet
+drop-in still pointed `EnvironmentFile` at kubeadm's default
+`/var/lib/kubelet/kubeadm-flags.env`, which nothing writes to on the
+agent-mediated path). This section closes Task 12 ("devenv イメージの追従
+(/var/lib 問題)") of the 2026-07-13 Step 2 implementation plan (docs repo,
+outside this git repository):
+
+- `image/overlay/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf`:
+  `EnvironmentFile` repointed to `/etc/kubernetes/kubeadm-flags.env` (see
+  "Image contents" above). `--config`/`--kubeconfig` were already
+  confext-deliverable paths, unchanged.
+- `image/Containerfile`: `erofs-utils` added to the package list. Verified
+  rootlessly (no image build needed) against the exact base image this
+  Containerfile starts `FROM`:
+  `podman run --rm quay.io/fedora/fedora-bootc:latest rpm -q
+  selinux-policy-targeted erofs-utils` shows `selinux-policy-targeted-44.3-1.fc44`
+  already present and `erofs-utils` absent; a rootless `dnf install
+  erofs-utils` against that same base pulled cleanly
+  (`erofs-utils-1.9.2-2.fc44.x86_64` + 4 small deps, ~654 KiB). `erofs-utils`
+  is not yet load-bearing in this image -- it becomes load-bearing once
+  `nanokube init`'s bootstrap path builds confext DDIs on-node itself
+  (Step 2 Task 8, not yet implemented; tracked, not done here). `restorecon`
+  / `matchpathcon` / `getenforce` (needed by the future SELinux verification
+  script, Step 2 Task 14) come from `policycoreutils`, already present in the
+  base image.
+- `build-image.sh`: added a post-build `podman run --rm "${IMAGE_TAG}" rpm -q
+  erofs-utils selinux-policy-targeted` check so a base-image drift that drops
+  either package fails the build loudly instead of silently.
+- **Not done here** (would need image rebuild + VM boot, both requiring
+  `sudo`; see "Rebuilding the image and rebooting the VM" below): actually
+  booting a VM from the rebuilt image and re-running the Step 2 Task B
+  SELinux E2E check (`restorecon -nv /etc/kubernetes` after a real reconciler
+  push). Also not done: wiring a `--selinux-file-contexts` flag into any
+  on-node `nanokube init` invocation -- that flag doesn't exist yet
+  (Step 2 Task 8 Step 3, not yet implemented).
+
+### Rebuilding the image and rebooting the VM
+
+Both steps below require `sudo` (`build-image.sh` needs rootful podman for
+`bootc-image-builder`, per the script's own header comment). Run from a
+checkout of this branch (`step2-task12`):
+
+```
+./test/devenv/build-image.sh
+./test/devenv/boot-vm.sh
+```
+
+Expected: `build-image.sh` finishes in a few minutes (cargo build of the
+agent, `podman build`, the new `rpm -q` check, push to the local registry,
+`bootc-image-builder` conversion) and prints `disk image: ...` /
+`next: ./boot-vm.sh`. If the `rpm -q` check fails, the package list drifted
+from what was verified above and needs re-checking before continuing.
+`boot-vm.sh` boots in well under a minute; SSH per the "Usage" section above
+confirms reachability. After boot, `EnvironmentFile=-/etc/kubernetes/kubeadm-flags.env`
+can be confirmed with:
+
+```
+ssh -i /var/tmp/nanokube-devenv/ssh/id_ed25519 -p 2222 devenv@127.0.0.1 \
+  systemctl cat kubelet.service
+```
 
 ## Runtime state (not in git)
 
