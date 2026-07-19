@@ -272,6 +272,13 @@ than blocking `boot-vm.sh` forever.
   inside a Kind pod on this host, only this address does. The test cluster
   and pod were deleted afterward (`kind delete cluster`).
 
+  **Correction (2026-07-19)**: this no longer holds as of commit `8806e99`,
+  which intentionally hardened the hostfwd to bind `127.0.0.1` instead of
+  `0.0.0.0`, so `169.254.1.2` is no longer reachable. The current path from a
+  Kind-adjacent workload to the agent is a rootless podman `--network=host`
+  container reaching the VM's forwarded port at `127.0.0.1:9090` directly
+  (demonstrated 2026-07-19).
+
 ## Verified on this VM (2026-07-06): confext ID=_any fix, 実装項目6.b/c closed for real
 
 A real-machine test run (`internal/ddi.Build` genuinely writing a version field into

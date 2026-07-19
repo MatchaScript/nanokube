@@ -144,7 +144,7 @@ podman run --rm --cap-add SYS_ADMIN --security-opt label=disable \
   -e GOCACHE=/work/gocache -e GOMODCACHE=/work/gomod -e GOFLAGS=-buildvcs=false \
   -v "$PWD":/src:ro -w /src \
   quay.io/fedora/fedora:42 \
-  bash -c 'dnf install -y -q golang systemd-udev erofs-utils selinux-policy-targeted libselinux-utils && go test -count=1 -v ./internal/ddi/...'
+  bash -c 'dnf install -y -q golang systemd-udev erofs-utils selinux-policy-targeted container-selinux libselinux-utils && go test -count=1 -v ./internal/ddi/...'
 ```
 
 Rootless podman is sufficient; no sudo.

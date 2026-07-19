@@ -101,7 +101,7 @@ jobs:
       options: --cap-add SYS_ADMIN
     steps:
       - name: Install build dependencies
-        run: dnf install -y systemd-container systemd-udev erofs-utils gcc selinux-policy-targeted libselinux-utils --setopt=install_weak_deps=False -q
+        run: dnf install -y systemd-container systemd-udev erofs-utils gcc selinux-policy-targeted container-selinux libselinux-utils --setopt=install_weak_deps=False -q
 
       - uses: actions/checkout@v4
 
