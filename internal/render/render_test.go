@@ -340,10 +340,11 @@ func TestControlPlaneManifests_IgnoresRenderHostProxyEnv(t *testing.T) {
 // TestControlPlaneManifests_NoAmbientCACertMounts guards against
 // kubeadm's getHostPathVolumesForTheControlPlane, which os.Stat's a
 // fixed list of render-host paths (see ambientCACertMountPaths) and
-// conditionally mounts whichever exist. This dev host actually has two
-// of the five (/etc/pki/ca-trust, /etc/pki/tls/certs), so without
-// stripAmbientHostMounts this test would fail right here — it is not
-// merely a hypothetical.
+// conditionally mounts whichever exist. Our construction in
+// manifests.go must never emit these mounts in the first place (no
+// generate-then-strip pass exists); this test guards that. It is not
+// merely a hypothetical: this dev host actually has two of the five
+// (/etc/pki/ca-trust, /etc/pki/tls/certs) present.
 func TestControlPlaneManifests_NoAmbientCACertMounts(t *testing.T) {
 	cfg := defaultedInit(t)
 	cfg.LocalAPIEndpoint.AdvertiseAddress = "192.0.2.10"

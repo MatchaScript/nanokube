@@ -50,6 +50,31 @@ func manifestVariants() []manifestVariant {
 			}
 			cfg.APIServer.ExtraEnvs = []kubeadmapi.EnvVar{{EnvVar: corev1.EnvVar{Name: "FOO", Value: "bar"}}}
 		}},
+		{"controller-manager-flexvolume-dir", func(cfg *kubeadmapi.InitConfiguration) {
+			// Non-default flex-volume-plugin-dir must replace the
+			// flexvolume hostPath mount's path.
+			cfg.ControllerManager.ExtraArgs = []kubeadmapi.Arg{
+				{Name: "flex-volume-plugin-dir", Value: "/opt/custom-flexvolume"},
+			}
+		}},
+		{"etcd-extra-args", func(cfg *kubeadmapi.InitConfiguration) {
+			// advertise-client-urls must replace the apiserver's
+			// --etcd-servers value; listen-metrics-urls (non-default
+			// scheme+port) must be observable in the etcd probe
+			// derivation (etcdProbeEndpoint's URL parse).
+			cfg.Etcd.Local.ExtraArgs = []kubeadmapi.Arg{
+				{Name: "advertise-client-urls", Value: "https://192.0.2.10:2379"},
+				{Name: "listen-metrics-urls", Value: "https://127.0.0.1:2381"},
+			}
+		}},
+		{"apiserver-invalid-authz-mode", func(cfg *kubeadmapi.InitConfiguration) {
+			// A user-supplied authorization-mode containing an actually
+			// invalid mode name must still be passed through wholesale
+			// and unfiltered (apiServerCommand's doc comment).
+			cfg.APIServer.ExtraArgs = []kubeadmapi.Arg{
+				{Name: "authorization-mode", Value: "Node,RBAC,Bogus"},
+			}
+		}},
 	}
 }
 
