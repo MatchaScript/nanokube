@@ -59,13 +59,19 @@ fn validate_name(name: &str) -> Result<(), Status> {
 /// shelling out to the real `systemd-confext`/`bootc` binaries.
 pub struct RealOpsProvider {
     confexts_dir: PathBuf,
+    archive_dir: PathBuf,
     bookkeeping_path: PathBuf,
 }
 
 impl RealOpsProvider {
-    pub fn new(confexts_dir: impl Into<PathBuf>, bookkeeping_path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        confexts_dir: impl Into<PathBuf>,
+        archive_dir: impl Into<PathBuf>,
+        bookkeeping_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             confexts_dir: confexts_dir.into(),
+            archive_dir: archive_dir.into(),
             bookkeeping_path: bookkeeping_path.into(),
         }
     }
@@ -75,6 +81,7 @@ impl OpsProvider for RealOpsProvider {
     fn ops(&self) -> Box<dyn Ops + Send> {
         Box::new(RealOps::new(
             self.confexts_dir.clone(),
+            self.archive_dir.clone(),
             self.bookkeeping_path.clone(),
         ))
     }
@@ -130,6 +137,9 @@ fn to_status(err: ApplyError) -> Status {
             Status::invalid_argument(format!("blob checksum mismatch: want {want}, got {got}"))
         }
         ApplyError::Ops(e) => Status::internal(e.to_string()),
+        ApplyError::KubeletDownAfterRefresh => {
+            Status::internal("kubelet was active before refresh and is not active after refresh")
+        }
     }
 }
 
@@ -172,9 +182,29 @@ mod tests {
             Ok(())
         }
 
+        fn archive_previous(
+            &mut self,
+            current_name: &str,
+            previous_name: &str,
+        ) -> Result<(), OpsError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("archive_previous:{current_name}:{previous_name}"));
+            Ok(())
+        }
+
         fn refresh(&mut self) -> Result<(), OpsError> {
             self.calls.lock().unwrap().push("refresh".to_string());
             Ok(())
+        }
+
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("kubelet_is_active".to_string());
+            Ok(false)
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -238,8 +268,20 @@ mod tests {
             Ok(())
         }
 
+        fn archive_previous(
+            &mut self,
+            _current_name: &str,
+            _previous_name: &str,
+        ) -> Result<(), OpsError> {
+            Ok(())
+        }
+
         fn refresh(&mut self) -> Result<(), OpsError> {
             Ok(())
+        }
+
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            Ok(false)
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -289,7 +331,9 @@ mod tests {
             *calls.lock().unwrap(),
             vec![
                 "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
                 "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
                 "refresh".to_string(),
                 "write_bookkeeping:v1-name".to_string(),
             ]

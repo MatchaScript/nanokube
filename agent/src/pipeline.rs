@@ -64,8 +64,19 @@ impl std::error::Error for OpsError {}
 pub trait Ops {
     /// Place the confext DDI blob under the given desired-document name.
     fn place(&mut self, name: &str, blob: &[u8]) -> Result<(), OpsError>;
+    /// Moves the previous generation's blob (if any) out of the confexts
+    /// directory into a one-generation archive, so the confexts
+    /// directory holds only `current_name`'s blob afterward.
+    /// `previous_name` is bookkeeping's last-applied name (`""` if this
+    /// is the first-ever apply). Retention is exactly one archived
+    /// generation: archiving a new one replaces whatever was archived
+    /// before.
+    fn archive_previous(&mut self, current_name: &str, previous_name: &str)
+    -> Result<(), OpsError>;
     /// Refresh confexts so the newly placed blob takes effect.
     fn refresh(&mut self) -> Result<(), OpsError>;
+    /// Whether the `kubelet.service` unit is currently active.
+    fn kubelet_is_active(&mut self) -> Result<bool, OpsError>;
     fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError>;
     fn write_bookkeeping(&mut self, bk: &Bookkeeping) -> Result<(), OpsError>;
     /// `Ok(None)` means "not a bootc host": config delivery still
@@ -83,6 +94,10 @@ pub enum ApplyError {
         got: String,
     },
     Ops(OpsError),
+    /// kubelet was active before the refresh and is not afterwards. The
+    /// agent stops and surfaces the fact; recovery is the operator's
+    /// revert (design doc: no judgment/rollback logic on the node).
+    KubeletDownAfterRefresh,
 }
 
 impl fmt::Display for ApplyError {
@@ -92,6 +107,12 @@ impl fmt::Display for ApplyError {
                 write!(f, "blob checksum mismatch: want {want}, got {got}")
             }
             ApplyError::Ops(e) => write!(f, "{e}"),
+            ApplyError::KubeletDownAfterRefresh => {
+                write!(
+                    f,
+                    "kubelet was active before refresh and is not active after refresh"
+                )
+            }
         }
     }
 }
@@ -100,7 +121,7 @@ impl std::error::Error for ApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ApplyError::Ops(e) => Some(e),
-            ApplyError::ChecksumMismatch { .. } => None,
+            ApplyError::ChecksumMismatch { .. } | ApplyError::KubeletDownAfterRefresh => None,
         }
     }
 }
@@ -121,8 +142,23 @@ pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Resul
 
     let bk = ops.read_bookkeeping()?;
     if bk.desired_name != desired.name {
+        // Bootstrap intentionally pushes desired before starting kubelet,
+        // so only poll again after refresh (and only fail on it) if
+        // kubelet was already active beforehand.
+        let kubelet_was_active = ops.kubelet_is_active()?;
         ops.place(&desired.name, blob)?;
+        // systemd-confext merges every image present under the confexts
+        // directory, and merge order is by image name (= revision hash,
+        // unrelated to age) — so if both the old and new generation were
+        // present during refresh, the old one could sort after the new
+        // one and mask its content/labels. Archiving the previous
+        // generation out before refresh guarantees refresh only ever
+        // sees the single current image.
+        ops.archive_previous(&desired.name, &bk.desired_name)?;
         ops.refresh()?;
+        if kubelet_was_active && !ops.kubelet_is_active()? {
+            return Err(ApplyError::KubeletDownAfterRefresh);
+        }
         ops.write_bookkeeping(&Bookkeeping {
             desired_name: desired.name.clone(),
         })?;
@@ -156,6 +192,13 @@ mod tests {
         bootc_status_response: Result<Option<BootcStatus>, OpsError>,
         write_bookkeeping_calls: Vec<Bookkeeping>,
         switch_targets: Vec<String>,
+        archive_previous_result: Result<(), OpsError>,
+        refresh_result: Result<(), OpsError>,
+        /// `kubelet_is_active`'s answers in call order; a query beyond
+        /// the configured sequence keeps returning the last entry (or
+        /// `false` if the sequence is empty).
+        kubelet_active_sequence: Vec<bool>,
+        kubelet_queries: usize,
     }
 
     impl Default for FakeOps {
@@ -166,6 +209,10 @@ mod tests {
                 bootc_status_response: Ok(None),
                 write_bookkeeping_calls: Vec::new(),
                 switch_targets: Vec::new(),
+                archive_previous_result: Ok(()),
+                refresh_result: Ok(()),
+                kubelet_active_sequence: vec![false],
+                kubelet_queries: 0,
             }
         }
     }
@@ -176,9 +223,31 @@ mod tests {
             Ok(())
         }
 
+        fn archive_previous(
+            &mut self,
+            current_name: &str,
+            previous_name: &str,
+        ) -> Result<(), OpsError> {
+            self.calls
+                .push(format!("archive_previous:{current_name}:{previous_name}"));
+            self.archive_previous_result.clone()
+        }
+
         fn refresh(&mut self) -> Result<(), OpsError> {
             self.calls.push("refresh".to_string());
-            Ok(())
+            self.refresh_result.clone()
+        }
+
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            self.calls.push("kubelet_is_active".to_string());
+            let active = self
+                .kubelet_active_sequence
+                .get(self.kubelet_queries)
+                .or_else(|| self.kubelet_active_sequence.last())
+                .copied()
+                .unwrap_or(false);
+            self.kubelet_queries += 1;
+            Ok(active)
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -253,7 +322,9 @@ mod tests {
             ops.calls,
             vec![
                 "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
                 "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
                 "refresh".to_string(),
                 "write_bookkeeping:v1-name".to_string(),
             ]
@@ -264,5 +335,108 @@ mod tests {
                 desired_name: "v1-name".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn refresh_failure_leaves_bookkeeping_unwritten() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            refresh_result: Err(OpsError("systemd-confext: boom".to_string())),
+            ..FakeOps::default()
+        };
+
+        let err = apply(&d, blob, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyError::Ops(_)));
+        assert_eq!(
+            ops.calls,
+            vec![
+                "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
+                "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
+                "refresh".to_string(),
+            ]
+        );
+        assert!(ops.write_bookkeeping_calls.is_empty());
+    }
+
+    #[test]
+    fn archive_failure_leaves_bookkeeping_unwritten() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            archive_previous_result: Err(OpsError("archive_previous: boom".to_string())),
+            ..FakeOps::default()
+        };
+
+        let err = apply(&d, blob, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyError::Ops(_)));
+        // apply() aborts right after archive_previous fails: refresh and
+        // the kubelet recheck never run, and bookkeeping is untouched.
+        assert_eq!(
+            ops.calls,
+            vec![
+                "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
+                "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
+            ]
+        );
+        assert!(ops.write_bookkeeping_calls.is_empty());
+    }
+
+    #[test]
+    fn refresh_failure_when_kubelet_was_active_and_died() {
+        // kubelet active before apply, inactive after refresh → error out
+        // (stop and surface; no rollback logic on the node).
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            kubelet_active_sequence: vec![true, false],
+            ..FakeOps::default()
+        };
+
+        let err = apply(&d, blob, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyError::KubeletDownAfterRefresh));
+        assert!(ops.write_bookkeeping_calls.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_with_inactive_kubelet_skips_the_check() {
+        // kubelet not yet started (init pushes desired before starting
+        // it): apply must succeed and never re-query.
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            kubelet_active_sequence: vec![false],
+            ..FakeOps::default()
+        };
+
+        apply(&d, blob, &mut ops).unwrap();
+
+        assert_eq!(
+            ops.kubelet_queries, 1,
+            "must not poll kubelet when it was not running"
+        );
+    }
+
+    #[test]
+    fn same_name_repush_is_a_no_op() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            bookkeeping: Bookkeeping {
+                desired_name: "v1-name".to_string(),
+            },
+            ..FakeOps::default()
+        };
+
+        apply(&d, blob, &mut ops).unwrap();
+
+        assert_eq!(ops.calls, vec!["read_bookkeeping".to_string()]);
     }
 }

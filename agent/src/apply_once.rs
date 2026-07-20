@@ -115,9 +115,24 @@ mod tests {
             Ok(())
         }
 
+        fn archive_previous(
+            &mut self,
+            current_name: &str,
+            previous_name: &str,
+        ) -> Result<(), OpsError> {
+            self.calls
+                .push(format!("archive_previous:{current_name}:{previous_name}"));
+            Ok(())
+        }
+
         fn refresh(&mut self) -> Result<(), OpsError> {
             self.calls.push("refresh".to_string());
             Ok(())
+        }
+
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            self.calls.push("kubelet_is_active".to_string());
+            Ok(false)
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
