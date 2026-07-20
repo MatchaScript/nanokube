@@ -192,6 +192,7 @@ mod tests {
         bootc_status_response: Result<Option<BootcStatus>, OpsError>,
         write_bookkeeping_calls: Vec<Bookkeeping>,
         switch_targets: Vec<String>,
+        archive_previous_result: Result<(), OpsError>,
         refresh_result: Result<(), OpsError>,
         /// `kubelet_is_active`'s answers in call order; a query beyond
         /// the configured sequence keeps returning the last entry (or
@@ -208,6 +209,7 @@ mod tests {
                 bootc_status_response: Ok(None),
                 write_bookkeeping_calls: Vec::new(),
                 switch_targets: Vec::new(),
+                archive_previous_result: Ok(()),
                 refresh_result: Ok(()),
                 kubelet_active_sequence: vec![false],
                 kubelet_queries: 0,
@@ -228,7 +230,7 @@ mod tests {
         ) -> Result<(), OpsError> {
             self.calls
                 .push(format!("archive_previous:{current_name}:{previous_name}"));
-            Ok(())
+            self.archive_previous_result.clone()
         }
 
         fn refresh(&mut self) -> Result<(), OpsError> {
@@ -355,6 +357,32 @@ mod tests {
                 "place:v1-name".to_string(),
                 "archive_previous:v1-name:".to_string(),
                 "refresh".to_string(),
+            ]
+        );
+        assert!(ops.write_bookkeeping_calls.is_empty());
+    }
+
+    #[test]
+    fn archive_failure_leaves_bookkeeping_unwritten() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            archive_previous_result: Err(OpsError("archive_previous: boom".to_string())),
+            ..FakeOps::default()
+        };
+
+        let err = apply(&d, blob, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyError::Ops(_)));
+        // apply() aborts right after archive_previous fails: refresh and
+        // the kubelet recheck never run, and bookkeeping is untouched.
+        assert_eq!(
+            ops.calls,
+            vec![
+                "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
+                "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
             ]
         );
         assert!(ops.write_bookkeeping_calls.is_empty());
