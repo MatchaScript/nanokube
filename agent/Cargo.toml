@@ -14,6 +14,7 @@ sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

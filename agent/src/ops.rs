@@ -5,7 +5,10 @@
 //! JSON file, and reconciles the booted OS image via `bootc`. All of
 //! that is real filesystem I/O, but subprocess invocation sits behind
 //! the injectable [`CommandRunner`] seam so tests never shell out to
-//! `systemd-confext`/`bootc`.
+//! `systemd-confext`/`bootc`. `kubelet.service`'s state is instead read
+//! straight off `org.freedesktop.systemd1` over D-Bus (see
+//! [`SystemdBus`]), behind its own injectable seam so tests never touch
+//! a real system bus either.
 
 use std::fs;
 use std::io;
@@ -85,6 +88,167 @@ impl CommandRunner for RealCommandRunner {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+/// `ActiveState` + `LoadState` of a systemd unit, as reported by the
+/// `org.freedesktop.systemd1.Unit` D-Bus interface's properties of the
+/// same names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnitState {
+    active_state: String,
+    load_state: String,
+}
+
+/// Error querying a unit's state over D-Bus: connecting to the bus,
+/// calling `LoadUnit`, or reading a property failed. Mirrors
+/// [`RunError`]'s role for [`CommandRunner`] -- a "couldn't ask" signal
+/// that must never be conflated with a legitimate answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DbusError(String);
+
+impl std::fmt::Display for DbusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for DbusError {}
+
+/// Injectable seam for querying a systemd unit's state over D-Bus.
+/// Production code uses [`RealSystemdBus`]; tests substitute a fake that
+/// records the queried unit name and returns a configured response,
+/// without ever touching a real bus.
+trait SystemdBus {
+    fn unit_state(&mut self, unit: &str) -> Result<UnitState, DbusError>;
+}
+
+/// Manager object (fixed path/service), the entry point for resolving a
+/// unit name to its own object path.
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_service = "org.freedesktop.systemd1",
+    default_path = "/org/freedesktop/systemd1",
+    gen_blocking = false
+)]
+trait Manager {
+    /// Resolves `name` to its unit object path, loading the unit from
+    /// disk first if systemd hasn't already loaded it this boot (unlike
+    /// `GetUnit`, which only succeeds for a unit systemd has already
+    /// loaded/referenced -- see [`RealSystemdBus::unit_state`]).
+    #[zbus(name = "LoadUnit")]
+    fn load_unit(&self, name: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+}
+
+/// A unit object at a path resolved by [`ManagerProxy::load_unit`].
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Unit",
+    default_service = "org.freedesktop.systemd1",
+    gen_blocking = false
+)]
+trait Unit {
+    #[zbus(property)]
+    fn active_state(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn load_state(&self) -> zbus::Result<String>;
+}
+
+/// Runs `fut` to completion on the calling thread, whether or not a
+/// tokio runtime is already active there.
+///
+/// [`RealOps::kubelet_is_active`] is a plain synchronous `Ops` method (a
+/// seam requirement this D-Bus rewrite doesn't get to change), but it's
+/// invoked from two different contexts: already inside the gRPC
+/// server's tokio runtime (`server.rs`'s `push_desired`), and from
+/// `apply --once`'s plain `fn main`, which never starts a runtime at
+/// all. `zbus::blocking` (even with the `tokio` feature) keeps its own
+/// separate background runtime and drives it with a plain
+/// `Runtime::block_on`, which panics ("Cannot start a runtime from
+/// within a runtime") if the calling thread is already inside a
+/// runtime -- zbus's own docs call this the "async sandwich" footgun.
+/// `block_in_place` is tokio's documented way out: it hands the current
+/// task off to a spare worker thread so `Handle::block_on` can reenter
+/// the *same* runtime instead of starting a second one.
+fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => tokio::runtime::Runtime::new()
+            .expect("start tokio runtime for D-Bus query")
+            .block_on(fut),
+    }
+}
+
+/// Queries the real system D-Bus via `org.freedesktop.systemd1`. A
+/// fresh connection is opened per call, mirroring [`RealCommandRunner`]
+/// spawning a fresh process per call.
+struct RealSystemdBus;
+
+impl SystemdBus for RealSystemdBus {
+    fn unit_state(&mut self, unit: &str) -> Result<UnitState, DbusError> {
+        run_async(async {
+            let connection = zbus::Connection::system()
+                .await
+                .map_err(|e| DbusError(format!("connect to system bus: {e}")))?;
+
+            let manager = ManagerProxy::new(&connection)
+                .await
+                .map_err(|e| DbusError(format!("build Manager proxy: {e}")))?;
+            let unit_path = manager
+                .load_unit(unit)
+                .await
+                .map_err(|e| DbusError(format!("LoadUnit {unit}: {e}")))?;
+
+            let unit_proxy = UnitProxy::builder(&connection)
+                .path(unit_path)
+                .map_err(|e| DbusError(format!("Unit proxy path for {unit}: {e}")))?
+                .build()
+                .await
+                .map_err(|e| DbusError(format!("build Unit proxy for {unit}: {e}")))?;
+            let active_state = unit_proxy
+                .active_state()
+                .await
+                .map_err(|e| DbusError(format!("get {unit} ActiveState: {e}")))?;
+            let load_state = unit_proxy
+                .load_state()
+                .await
+                .map_err(|e| DbusError(format!("get {unit} LoadState: {e}")))?;
+
+            Ok(UnitState {
+                active_state,
+                load_state,
+            })
+        })
+    }
+}
+
+const KUBELET_UNIT: &str = "kubelet.service";
+
+/// Reduces `unit`'s D-Bus state to the `Ops::kubelet_is_active` boolean.
+///
+/// D-Bus instead of shelling out to `systemctl is-active` for two
+/// reasons:
+/// 1. `systemctl` itself failing to reach systemd (e.g. "Failed to
+///    connect to bus") exits non-zero exactly like a genuine "inactive"
+///    answer, so the CLI-based check couldn't tell "couldn't ask" from
+///    "asked, and the answer is no". A D-Bus connection/call failure
+///    here surfaces as `Err` instead of silently reading as `Ok(false)`.
+/// 2. `is-active`'s exit code only reflects `ActiveState`; it can't
+///    distinguish a cleanly stopped unit from one that's masked
+///    (`LoadState=masked`) or has no unit file at all
+///    (`LoadState=not-found`) -- all three exit non-zero identically.
+///    Reading `LoadState` alongside `ActiveState` lets the log line
+///    below tell a human which of those actually happened.
+fn kubelet_state(bus: &mut impl SystemdBus) -> Result<bool, OpsError> {
+    let state = bus
+        .unit_state(KUBELET_UNIT)
+        .map_err(|e| OpsError(format!("query {KUBELET_UNIT} over D-Bus: {e}")))?;
+    let active = state.active_state == "active";
+    if !active {
+        eprintln!(
+            "{KUBELET_UNIT}: ActiveState={} LoadState={}",
+            state.active_state, state.load_state
+        );
+    }
+    Ok(active)
 }
 
 /// Real [`Ops`] implementation, backed by real files under
@@ -195,17 +359,7 @@ impl<R: CommandRunner> Ops for RealOps<R> {
     }
 
     fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
-        match self
-            .runner
-            .run("systemctl", &["is-active", "--quiet", "kubelet.service"])
-        {
-            Ok(_) => Ok(true),
-            // Any non-zero exit (inactive, failed, unit not found, ...)
-            // reads as "not active", not an error. Only the command
-            // itself failing to start is an OpsError.
-            Err(RunError::Failed(_)) => Ok(false),
-            Err(e @ RunError::NotFound(_)) => Err(to_ops_error(e)),
-        }
+        kubelet_state(&mut RealSystemdBus)
     }
 
     fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -655,58 +809,78 @@ mod tests {
         assert!(raw_files(&archive_dir).is_empty());
     }
 
-    // --- kubelet_is_active -----------------------------------------------
+    // --- kubelet_state (D-Bus) --------------------------------------------
 
-    #[test]
-    fn kubelet_is_active_true_on_zero_exit() {
-        let dir = TempDir::new().unwrap();
-        let runner = FakeCommandRunner::new().push(Ok(String::new()));
-        let mut ops = RealOps::with_runner(
-            dir.path(),
-            dir.path().join("archive"),
-            dir.path().join("bk.json"),
-            runner,
-        );
+    /// Records the queried unit name and returns a configured response,
+    /// without ever touching a real bus.
+    struct FakeSystemdBus {
+        calls: Vec<String>,
+        response: Result<UnitState, DbusError>,
+    }
 
-        assert!(ops.kubelet_is_active().unwrap());
-        assert_eq!(
-            ops.runner.calls,
-            vec![call(
-                "systemctl",
-                &["is-active", "--quiet", "kubelet.service"]
-            )]
-        );
+    impl FakeSystemdBus {
+        fn new(response: Result<UnitState, DbusError>) -> Self {
+            Self {
+                calls: Vec::new(),
+                response,
+            }
+        }
+    }
+
+    impl SystemdBus for FakeSystemdBus {
+        fn unit_state(&mut self, unit: &str) -> Result<UnitState, DbusError> {
+            self.calls.push(unit.to_string());
+            self.response.clone()
+        }
+    }
+
+    fn unit_state(active_state: &str, load_state: &str) -> UnitState {
+        UnitState {
+            active_state: active_state.to_string(),
+            load_state: load_state.to_string(),
+        }
     }
 
     #[test]
-    fn kubelet_is_active_false_on_nonzero_exit_including_unit_not_found() {
-        let dir = TempDir::new().unwrap();
-        let runner = FakeCommandRunner::new().push(Err(RunError::Failed(
-            "kubelet.service: inactive".to_string(),
-        )));
-        let mut ops = RealOps::with_runner(
-            dir.path(),
-            dir.path().join("archive"),
-            dir.path().join("bk.json"),
-            runner,
-        );
+    fn kubelet_state_true_when_active_state_is_active() {
+        let mut bus = FakeSystemdBus::new(Ok(unit_state("active", "loaded")));
 
-        assert!(!ops.kubelet_is_active().unwrap());
+        assert!(kubelet_state(&mut bus).unwrap());
+        assert_eq!(bus.calls, vec![KUBELET_UNIT.to_string()]);
     }
 
     #[test]
-    fn kubelet_is_active_propagates_command_spawn_failure() {
-        let dir = TempDir::new().unwrap();
-        let runner = FakeCommandRunner::new()
-            .push(Err(RunError::NotFound("systemctl: not found".to_string())));
-        let mut ops = RealOps::with_runner(
-            dir.path(),
-            dir.path().join("archive"),
-            dir.path().join("bk.json"),
-            runner,
-        );
+    fn kubelet_state_false_when_cleanly_inactive() {
+        let mut bus = FakeSystemdBus::new(Ok(unit_state("inactive", "loaded")));
 
-        assert!(ops.kubelet_is_active().is_err());
+        assert!(!kubelet_state(&mut bus).unwrap());
+    }
+
+    #[test]
+    fn kubelet_state_false_when_masked() {
+        // LoadState=masked (unit symlinked to /dev/null, cannot be
+        // started) reads as "not active" just like a clean stop -- the
+        // distinction survives only in the log line, not the boolean.
+        let mut bus = FakeSystemdBus::new(Ok(unit_state("inactive", "masked")));
+
+        assert!(!kubelet_state(&mut bus).unwrap());
+    }
+
+    #[test]
+    fn kubelet_state_false_when_not_found() {
+        // LoadState=not-found (no unit file at all) likewise reads as
+        // "not active", not an error: LoadUnit itself succeeded.
+        let mut bus = FakeSystemdBus::new(Ok(unit_state("inactive", "not-found")));
+
+        assert!(!kubelet_state(&mut bus).unwrap());
+    }
+
+    #[test]
+    fn kubelet_state_propagates_dbus_failure_as_ops_error() {
+        let mut bus =
+            FakeSystemdBus::new(Err(DbusError("connect to system bus: boom".to_string())));
+
+        assert!(kubelet_state(&mut bus).is_err());
     }
 
     // --- refresh (bug 3 regression) --------------------------------
