@@ -194,6 +194,20 @@ impl<R: CommandRunner> Ops for RealOps<R> {
             .map_err(to_ops_error)
     }
 
+    fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+        match self
+            .runner
+            .run("systemctl", &["is-active", "--quiet", "kubelet.service"])
+        {
+            Ok(_) => Ok(true),
+            // Any non-zero exit (inactive, failed, unit not found, ...)
+            // reads as "not active", not an error. Only the command
+            // itself failing to start is an OpsError.
+            Err(RunError::Failed(_)) => Ok(false),
+            Err(e @ RunError::NotFound(_)) => Err(to_ops_error(e)),
+        }
+    }
+
     fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
         let data = match fs::read(&self.bookkeeping_path) {
             Ok(d) => d,
@@ -639,6 +653,60 @@ mod tests {
 
         assert_eq!(raw_files(&confexts_dir), vec!["new.raw"]);
         assert!(raw_files(&archive_dir).is_empty());
+    }
+
+    // --- kubelet_is_active -----------------------------------------------
+
+    #[test]
+    fn kubelet_is_active_true_on_zero_exit() {
+        let dir = TempDir::new().unwrap();
+        let runner = FakeCommandRunner::new().push(Ok(String::new()));
+        let mut ops = RealOps::with_runner(
+            dir.path(),
+            dir.path().join("archive"),
+            dir.path().join("bk.json"),
+            runner,
+        );
+
+        assert!(ops.kubelet_is_active().unwrap());
+        assert_eq!(
+            ops.runner.calls,
+            vec![call(
+                "systemctl",
+                &["is-active", "--quiet", "kubelet.service"]
+            )]
+        );
+    }
+
+    #[test]
+    fn kubelet_is_active_false_on_nonzero_exit_including_unit_not_found() {
+        let dir = TempDir::new().unwrap();
+        let runner = FakeCommandRunner::new().push(Err(RunError::Failed(
+            "kubelet.service: inactive".to_string(),
+        )));
+        let mut ops = RealOps::with_runner(
+            dir.path(),
+            dir.path().join("archive"),
+            dir.path().join("bk.json"),
+            runner,
+        );
+
+        assert!(!ops.kubelet_is_active().unwrap());
+    }
+
+    #[test]
+    fn kubelet_is_active_propagates_command_spawn_failure() {
+        let dir = TempDir::new().unwrap();
+        let runner = FakeCommandRunner::new()
+            .push(Err(RunError::NotFound("systemctl: not found".to_string())));
+        let mut ops = RealOps::with_runner(
+            dir.path(),
+            dir.path().join("archive"),
+            dir.path().join("bk.json"),
+            runner,
+        );
+
+        assert!(ops.kubelet_is_active().is_err());
     }
 
     // --- refresh (bug 3 regression) --------------------------------

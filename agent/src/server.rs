@@ -137,6 +137,9 @@ fn to_status(err: ApplyError) -> Status {
             Status::invalid_argument(format!("blob checksum mismatch: want {want}, got {got}"))
         }
         ApplyError::Ops(e) => Status::internal(e.to_string()),
+        ApplyError::KubeletDownAfterRefresh => {
+            Status::internal("kubelet was active before refresh and is not active after refresh")
+        }
     }
 }
 
@@ -194,6 +197,14 @@ mod tests {
         fn refresh(&mut self) -> Result<(), OpsError> {
             self.calls.lock().unwrap().push("refresh".to_string());
             Ok(())
+        }
+
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("kubelet_is_active".to_string());
+            Ok(false)
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -269,6 +280,10 @@ mod tests {
             Ok(())
         }
 
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            Ok(false)
+        }
+
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
             Ok(Bookkeeping::default())
         }
@@ -316,6 +331,7 @@ mod tests {
             *calls.lock().unwrap(),
             vec![
                 "read_bookkeeping".to_string(),
+                "kubelet_is_active".to_string(),
                 "place:v1-name".to_string(),
                 "archive_previous:v1-name:".to_string(),
                 "refresh".to_string(),

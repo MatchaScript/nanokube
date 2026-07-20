@@ -130,6 +130,11 @@ mod tests {
             Ok(())
         }
 
+        fn kubelet_is_active(&mut self) -> Result<bool, OpsError> {
+            self.calls.push("kubelet_is_active".to_string());
+            Ok(false)
+        }
+
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
             self.calls.push("read_bookkeeping".to_string());
             Ok(Bookkeeping::default())
