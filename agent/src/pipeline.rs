@@ -64,6 +64,15 @@ impl std::error::Error for OpsError {}
 pub trait Ops {
     /// Place the confext DDI blob under the given desired-document name.
     fn place(&mut self, name: &str, blob: &[u8]) -> Result<(), OpsError>;
+    /// Moves the previous generation's blob (if any) out of the confexts
+    /// directory into a one-generation archive, so the confexts
+    /// directory holds only `current_name`'s blob afterward.
+    /// `previous_name` is bookkeeping's last-applied name (`""` if this
+    /// is the first-ever apply). Retention is exactly one archived
+    /// generation: archiving a new one replaces whatever was archived
+    /// before.
+    fn archive_previous(&mut self, current_name: &str, previous_name: &str)
+    -> Result<(), OpsError>;
     /// Refresh confexts so the newly placed blob takes effect.
     fn refresh(&mut self) -> Result<(), OpsError>;
     fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError>;
@@ -122,6 +131,14 @@ pub fn apply(desired: &DesiredMetadata, blob: &[u8], ops: &mut dyn Ops) -> Resul
     let bk = ops.read_bookkeeping()?;
     if bk.desired_name != desired.name {
         ops.place(&desired.name, blob)?;
+        // systemd-confext merges every image present under the confexts
+        // directory, and merge order is by image name (= revision hash,
+        // unrelated to age) — so if both the old and new generation were
+        // present during refresh, the old one could sort after the new
+        // one and mask its content/labels. Archiving the previous
+        // generation out before refresh guarantees refresh only ever
+        // sees the single current image.
+        ops.archive_previous(&desired.name, &bk.desired_name)?;
         ops.refresh()?;
         ops.write_bookkeeping(&Bookkeeping {
             desired_name: desired.name.clone(),
@@ -156,6 +173,7 @@ mod tests {
         bootc_status_response: Result<Option<BootcStatus>, OpsError>,
         write_bookkeeping_calls: Vec<Bookkeeping>,
         switch_targets: Vec<String>,
+        refresh_result: Result<(), OpsError>,
     }
 
     impl Default for FakeOps {
@@ -166,6 +184,7 @@ mod tests {
                 bootc_status_response: Ok(None),
                 write_bookkeeping_calls: Vec::new(),
                 switch_targets: Vec::new(),
+                refresh_result: Ok(()),
             }
         }
     }
@@ -176,9 +195,19 @@ mod tests {
             Ok(())
         }
 
+        fn archive_previous(
+            &mut self,
+            current_name: &str,
+            previous_name: &str,
+        ) -> Result<(), OpsError> {
+            self.calls
+                .push(format!("archive_previous:{current_name}:{previous_name}"));
+            Ok(())
+        }
+
         fn refresh(&mut self) -> Result<(), OpsError> {
             self.calls.push("refresh".to_string());
-            Ok(())
+            self.refresh_result.clone()
         }
 
         fn read_bookkeeping(&mut self) -> Result<Bookkeeping, OpsError> {
@@ -254,6 +283,7 @@ mod tests {
             vec![
                 "read_bookkeeping".to_string(),
                 "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
                 "refresh".to_string(),
                 "write_bookkeeping:v1-name".to_string(),
             ]
@@ -264,5 +294,45 @@ mod tests {
                 desired_name: "v1-name".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn refresh_failure_leaves_bookkeeping_unwritten() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            refresh_result: Err(OpsError("systemd-confext: boom".to_string())),
+            ..FakeOps::default()
+        };
+
+        let err = apply(&d, blob, &mut ops).unwrap_err();
+
+        assert!(matches!(err, ApplyError::Ops(_)));
+        assert_eq!(
+            ops.calls,
+            vec![
+                "read_bookkeeping".to_string(),
+                "place:v1-name".to_string(),
+                "archive_previous:v1-name:".to_string(),
+                "refresh".to_string(),
+            ]
+        );
+        assert!(ops.write_bookkeeping_calls.is_empty());
+    }
+
+    #[test]
+    fn same_name_repush_is_a_no_op() {
+        let blob = b"confext-blob";
+        let d = desired("v1-name", blob);
+        let mut ops = FakeOps {
+            bookkeeping: Bookkeeping {
+                desired_name: "v1-name".to_string(),
+            },
+            ..FakeOps::default()
+        };
+
+        apply(&d, blob, &mut ops).unwrap();
+
+        assert_eq!(ops.calls, vec!["read_bookkeeping".to_string()]);
     }
 }

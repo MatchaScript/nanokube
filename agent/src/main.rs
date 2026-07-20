@@ -21,6 +21,7 @@ use nanokube_agent::server::{AgentService, MAX_DESIRED_MESSAGE_BYTES, RealOpsPro
 /// (`docs/nanokube/2026-07-06-nanokube-component-architecture-rev5.md`).
 const DEFAULT_LISTEN: &str = "0.0.0.0:9090";
 const DEFAULT_CONFEXTS_DIR: &str = "/var/lib/confexts";
+const DEFAULT_ARCHIVE_DIR: &str = "/var/lib/nanokube/confexts-archive";
 const DEFAULT_BOOKKEEPING_PATH: &str = "/var/lib/nanokube/state/agent-bookkeeping.json";
 
 #[derive(Parser)]
@@ -51,6 +52,8 @@ struct ServeArgs {
     listen: String,
     #[arg(long, default_value = DEFAULT_CONFEXTS_DIR)]
     confexts_dir: PathBuf,
+    #[arg(long, default_value = DEFAULT_ARCHIVE_DIR)]
+    archive_dir: PathBuf,
     #[arg(long, default_value = DEFAULT_BOOKKEEPING_PATH)]
     bookkeeping_path: PathBuf,
 }
@@ -60,6 +63,7 @@ impl Default for ServeArgs {
         ServeArgs {
             listen: DEFAULT_LISTEN.to_string(),
             confexts_dir: PathBuf::from(DEFAULT_CONFEXTS_DIR),
+            archive_dir: PathBuf::from(DEFAULT_ARCHIVE_DIR),
             bookkeeping_path: PathBuf::from(DEFAULT_BOOKKEEPING_PATH),
         }
     }
@@ -78,6 +82,8 @@ struct ApplyArgs {
     desired: PathBuf,
     #[arg(long, default_value = DEFAULT_CONFEXTS_DIR)]
     confexts_dir: PathBuf,
+    #[arg(long, default_value = DEFAULT_ARCHIVE_DIR)]
+    archive_dir: PathBuf,
     #[arg(long, default_value = DEFAULT_BOOKKEEPING_PATH)]
     bookkeeping_path: PathBuf,
 }
@@ -108,7 +114,7 @@ fn serve(args: ServeArgs) -> ExitCode {
         }
     };
 
-    let provider = RealOpsProvider::new(args.confexts_dir, args.bookkeeping_path);
+    let provider = RealOpsProvider::new(args.confexts_dir, args.archive_dir, args.bookkeeping_path);
     let service = AgentService::new(provider);
 
     rt.block_on(async move {
@@ -135,7 +141,7 @@ fn apply_cmd(args: ApplyArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut ops = RealOps::new(args.confexts_dir, args.bookkeeping_path);
+    let mut ops = RealOps::new(args.confexts_dir, args.archive_dir, args.bookkeeping_path);
     match apply_once(&args.desired, &mut ops) {
         Ok(name) => {
             println!("applied {name}");
